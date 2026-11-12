@@ -123,7 +123,7 @@ def check():
         crash, clean = b"TVM1\x01\x01\x09ab", b"TVM1\x00" + bytes([halt])
         http("/api/events", {"project": PRACTICE, "type": "run", "text": "A program that really crashes", "agent": "self-check", "artifact": {"program_hex": crash.hex()}})
         http("/api/events", {"project": PRACTICE, "type": "run", "text": "A claimed crash that is not one", "agent": "self-check", "artifact": {"program_hex": clean.hex()}})
-        need(verifier.check_once(url) == 2, "the verifier did not score both runs")
+        need(verifier.check_once(url)[0] == 2, "the verifier did not score both runs")
         runs = {r["text"]: r for r in http(f"/api/runs?project={PRACTICE}&agent=self-check")}
         real, fake = runs["A program that really crashes"], runs["A claimed crash that is not one"]
         need(real["state"] == "confirmed" and real["detail"] == "IndexError in read_constants", f"the real crash was not confirmed: {real}")

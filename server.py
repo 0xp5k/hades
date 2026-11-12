@@ -59,6 +59,8 @@ TYPES = ["activity", "run", "verdict", "finding", "question", "item", "task", "t
 STRINGS = {"id": 80, "run": 80, "section": 80, "key": 200, "area": 200, "status": 40, "agent": 80,
            "harness": 80, "host": 80, "model": 60, "source": 20, "body": 30000, "answer": 6000}
 EVENTS = {}  # project id -> list of events, loaded from disk on first use
+IDS = {}  # project id -> {(type, id)} already in its log, so accepting a report never has to scan the log
+KEYED = ("run", "task", "question", "proposal")
 BOOT = time.time_ns()
 
 
@@ -79,6 +81,7 @@ def load(project):
                     except ValueError:
                         pass
             EVENTS[project] = out
+            IDS[project] = {(e.get("type"), e.get("id")) for e in out if e.get("type") in KEYED}
         return EVENTS[project]
 
 
@@ -104,6 +107,7 @@ def project_ids():
     with LOCK:  # deleting a project's folder removes the project; forget what was cached for it
         for gone in set(EVENTS) - on_disk:
             del EVENTS[gone]
+            IDS.pop(gone, None)
     return sorted(on_disk)
 
 
@@ -191,18 +195,20 @@ def ingest(data, ip="127.0.0.1", verifier=True, internal=False):
 
     with LOCK:
         events = load(project)
-        if type in ("run", "task", "question", "proposal"):
+        if type in KEYED:
             event.setdefault("id", f"{type[0]}{len(events) + 1}")
-            known = any(e["type"] == type and e.get("id") == event["id"] for e in events)
+            known = (type, event["id"]) in IDS[project]
             if not known and not event["text"]:
                 raise ValueError("text is required")
             if not known and "status" not in event and type in ("task", "proposal"):
                 event["status"] = "queued" if type == "task" else "proposed"
-        event ={"ts": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"), **event}
+        event = {"ts": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"), **event}
         (PROJECTS / project).mkdir(parents=True, exist_ok=True)
         with open(PROJECTS / project / "events.jsonl", "a") as f:
             f.write(json.dumps(event) + "\n")
         events.append(event)
+        if type in KEYED:
+            IDS[project].add((type, event["id"]))
     return event
 
 
@@ -742,6 +748,7 @@ def survey_brief(cfg, events, post, who, known, writing, person):
             "  \"ok\" means \"this run counts as a result\". Print ok false for anything that should not: an attempt that did not",
             "  succeed, a malformed artifact, a batch sent where one result was expected. Under \"unique\", every distinct detail",
             "  among the ok results is counted once, so an ok result labelled \"nothing found\" would wrongly count as a finding.",
+            "  Several copies of the script run at once, so it must not rely on a file or other state shared between copies.",
             "  It runs with the project's folder as its working directory, on the machine where the verifier runs, so refer to the",
             "  target by absolute path. It must give the same answer every time, must not trust anything inside the artifact, and",
             "  must not change any file.",

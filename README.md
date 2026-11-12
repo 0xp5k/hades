@@ -161,7 +161,10 @@ each machine that runs agents. Hades only starts agents if you create `launchers
 
 ## Known limits
 
-- The page loads a project's whole log. It is fine into the tens of thousands of events; beyond that it needs paging on
-  the server.
+- The page loads a project's whole log. Measured on one machine at 200,000 events (50 MB): it loads in under a second,
+  every server call answers in under 0.3 s, and an agent's brief stays near 35 kB. Well past that, or over a slow
+  network, it will need paging on the server.
+- The verifier scores up to 8 results at once (about 240 a second on the practice project). A scoring command that
+  cannot run alongside a copy of itself needs `"workers": 1` under `metric` in its `project.json`.
 - Turn-taking under an agent limit is rough: a waiting agent checks every 15 seconds.
 - Desktop notifications, remote tokens and MCP clients are written but lightly tested.
