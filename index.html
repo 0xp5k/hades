@@ -403,6 +403,11 @@ function derive(p) {
     else { r.first = best === null || (higher ? r.value > best : r.value < best); if (r.first) best = r.value; r.line = best; }
   }
   const scored = runList.filter(r => r.value !== null);
+  // What each agent's work came to: results it sent that the verifier could judge, and how many of those were new.
+  for (const r of runList) {
+    const a = agents.get(r.agent); if (!a || r.probe) continue;
+    a.tried = (a.tried || 0) + 1; if (r.value !== null && r.first) a.firsts = (a.firsts || 0) + 1;
+  }
   // On a measured section, the verifier's counts decide each entry's status; whatever status an agent sent is ignored.
   for (const sec of Array.isArray(p.config.sections) ? p.config.sections : []) {
     if (!sec || !sec.measured || typeof sec.measured !== "object") continue;
@@ -648,7 +653,7 @@ const views = {
         : `<div class="live"><span class="dot idle"></span><span>No agent has reported in the last ${LIVE_MS / 1000} seconds</span></div>`}</div>
       <div class="tiles">${m && d.headline !== null ? tile(fmt(d.headline), label, "runs") : ""}
         ${results.length ? tile(m && m.verified ? `${ok} of ${results.length}` : results.length, m && m.verified ? "Runs confirmed" : "Runs", "runs") : ""}
-        ${tile(`${up.length} of ${d.agents.length}`, "Agents live", "agents")}
+        ${tile(`${up.filter(a => a.harness !== "verifier.py").length} of ${d.agents.filter(a => a.harness !== "verifier.py").length}`, "Agents live", "agents")}
         ${(p.config.sections || []).filter(s => s && s.progress && Array.isArray(s.statuses) && s.statuses.length).map(s => {
           const its = [...(d.items.get(s.id) || new Map()).values()], done = its.filter(i => i.status === s.statuses[s.statuses.length - 1]).length;
           return its.length ? tile(`${done} of ${its.length}`, `${s.title || s.id} ${s.statuses[s.statuses.length - 1]}`, "s." + s.id) : ""; }).join("")}
@@ -824,6 +829,7 @@ const views = {
         <div class="sub">${esc(a.harness || "Unknown harness")}${verifier ? "" : `, model ${esc(a.model || "not reported")}`}, on ${esc(a.host || "unknown host")}</div>
         <div class="card mt2"><div class="sub">Doing</div>${esc(a.doing || "Nothing reported")}</div>
         ${verifier ? "" : `<div class="card"><div class="sub">Task</div>${a.task ? esc(a.task.text) : "None"}</div>`}
+        ${verifier || !a.tried ? "" : `<div class="card"><div class="sub">Yield</div>${plural(a.firsts || 0, d.unique ? "new result" : "improvement")} from ${plural(a.tried, "result")} sent${d.m && d.m.verified ? "" : " (not verified)"}</div>`}
         <div class="row mt2"><span class="sub">${plural(a.runs, "run")} ${verifier ? "checked" : "reported"}, ${plural(a.events, "event")}, last seen ${ago(a.ts).toLowerCase()}</span>
           ${(p.launched || []).some(r => r.alive && r.agent === a.name) ? `<button class="btn small ghost" data-stop-agent="${esc(a.name)}" data-fk="stop-card:${esc(a.name)}">Stop</button>` : ""}</div></div>`;
     }).join("");
