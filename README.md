@@ -29,11 +29,34 @@ Open http://127.0.0.1:8765.
 `loop.py` works with any harness that takes a prompt on standard input or as a file (`{brief_file}`).
 `run-live.sh` is a ready-made wrapper for Claude Code; `check-harness.sh` tries Codex or OhMyPi for one round.
 
+## Run it by talking to an agent
+
+Nothing to install. Open Claude Code on the same machine and say:
+
+    Read http://127.0.0.1:8765/api/coordinator and act as my coordinator for HAUS.
+
+It reads a short guide from the server and can then create projects, start and stop agents, queue tasks, change run
+settings and tell you what needs you. To have the same abilities built in as tools instead:
+
+    claude mcp add --transport http haus http://127.0.0.1:8765/mcp
+
+The coordinator cannot approve a setup proposal or answer agents' questions for you. Those stay with you, on the page.
+
+## Starting agents from the server
+
+Off by default. Copy `launchers.example.json` to `launchers.json` and edit the command for your harness. Each entry is a
+named recipe; Settings and the coordinator can start and stop those recipes and nothing else. Launched agents work in
+`agent-work/<project>/<agent>/`, where `loop.log` holds each one's output. A project can name a folder (`agent_files`)
+that every new agent starts with a copy of.
+
 ## What a harness can call
 
 | Call | What it does |
 |---|---|
 | `GET  /api/brief?project=X&agent=NAME` | Plain-text instructions plus current state |
+| `GET  /api/coordinator` | Plain-text guide for a chat agent that will run the server for you |
+| `POST /api/coordinate` | The coordinator's tools, without MCP |
+| `POST /api/launch`, `/api/stop` | Start and stop agents from a launch recipe |
 | `POST /api/events` | Report anything: activity, run, finding, question, item, task, tool, topic, proposal |
 | `POST /api/claim` | Take the oldest queued task |
 | `POST /api/slot` | Ask to start a round; honours the project's limit on agents at once |
@@ -61,7 +84,7 @@ To take reports from other machines:
     PROJECT_VIEW_TOKEN=<secret> PROJECT_VIEW_VERIFIER_TOKEN=<another> python3 server.py --host 0.0.0.0
 
 Agents then set `PROJECT_VIEW_URL` and `PROJECT_VIEW_TOKEN`. You still need your harness installed and signed in on
-each machine that runs agents; HAUS never starts agents itself.
+each machine that runs agents. HAUS only starts agents if you create `launchers.json`.
 
 ## Trust
 

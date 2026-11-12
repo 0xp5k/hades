@@ -10,3 +10,6 @@ toys/*/baseline.json
 # editor and tool settings
 .claude/
 .DS_Store
+
+# launch recipes are specific to each machine
+launchers.json

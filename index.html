@@ -178,6 +178,7 @@
   dialog .row { justify-content: flex-end; margin-top: 12px; }
   #toast { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); background: var(--overlay); border-radius: var(--r-md); padding: 10px 16px; z-index: 5; max-width: calc(100vw - 32px); }
   #settings > .row, #drawer > .row { justify-content: space-between; margin-top: 0; }
+  #settings .card .row { justify-content: space-between; margin-top: 0; }
   #bell, #gear, #theme { display: inline-flex; align-items: center; gap: 6px; padding: 9px 12px; }
   #settings h3 { font-size: 13px; font-weight: 600; margin: 22px 0 10px; padding-top: 16px; border-top: 1px solid var(--hair); }
   #settings h3:first-child { border-top: 0; margin-top: 8px; padding-top: 0; }
@@ -240,6 +241,8 @@
     <input class="field glass" id="np-name" required pattern="[A-Za-z0-9][A-Za-z0-9._\-]{0,79}" maxlength="80" autocomplete="off" placeholder="my-target">
     <label class="lbl" for="np-target">What is the target, and where does it live?</label>
     <textarea class="field glass" id="np-target" required rows="4" maxlength="4000" placeholder="For example: the file parser.py in /home/me/toy. It reads a small binary format. You can run it with python3."></textarea>
+    <label class="lbl" for="np-files">A folder each agent should start with a copy of (optional: the target, or its spec)</label>
+    <input class="field glass" id="np-files" maxlength="500" autocomplete="off" placeholder="/path/to/folder">
     <label class="lbl" for="np-goal">What do you hope to do with it? (optional; the agent will propose a goal if you leave this empty)</label>
     <input class="field glass" id="np-goal" maxlength="500" autocomplete="off" placeholder="Find every distinct way to make it crash">
     <div class="row"><button class="btn ghost" type="button" id="np-cancel">Cancel</button><button class="btn" id="np-ok">Create project</button></div>
@@ -260,7 +263,7 @@
 "use strict";
 const $ = s => document.querySelector(s);
 const LIVE_MS = 30000;
-const S = { projects: [], events: {}, epoch: {}, utab: "overview", seen: {}, told: null, limit: {}, q: "", open: new Set(), filter: "all", connected: true, loaded: false };
+const S = { projects: [], events: {}, epoch: {}, utab: "overview", seen: {}, told: null, limit: {}, launch: { recipe: "", count: 1, rounds: 4 }, q: "", open: new Set(), filter: "all", connected: true, loaded: false };
 
 /* ---------- small helpers ---------- */
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -820,9 +823,11 @@ const views = {
         <div class="sub">${esc(a.harness || "Unknown harness")}${verifier ? "" : `, model ${esc(a.model || "not reported")}`}, on ${esc(a.host || "unknown host")}</div>
         <div class="card mt2"><div class="sub">Doing</div>${esc(a.doing || "Nothing reported")}</div>
         ${verifier ? "" : `<div class="card"><div class="sub">Task</div>${a.task ? esc(a.task.text) : "None"}</div>`}
-        <div class="sub mt2">${plural(a.runs, "run")} ${verifier ? "checked" : "reported"}, ${plural(a.events, "event")}, last seen ${ago(a.ts).toLowerCase()}</div></div>`;
+        <div class="row mt2"><span class="sub">${plural(a.runs, "run")} ${verifier ? "checked" : "reported"}, ${plural(a.events, "event")}, last seen ${ago(a.ts).toLowerCase()}</span>
+          ${(p.launched || []).some(r => r.alive && r.agent === a.name) ? `<button class="btn small ghost" data-stop-agent="${esc(a.name)}" data-fk="stop-card:${esc(a.name)}">Stop</button>` : ""}</div></div>`;
     }).join("");
-    return cards ? `<div class="grid">${cards}</div>` : bare(d.agents.length ? "No matches" : "No agent has reported yet. The Connect page shows how to point one here.");
+    const bar = `<div class="row loose glass"><span class="sub">${(p.launched || []).filter(r => r.alive).length} started from this server are running.</span><button class="btn small" data-opensettings="1" data-fk="start-agents">Start agents</button></div>`;
+    return bar + (cards ? `<div class="grid">${cards}</div>` : bare(d.agents.length ? "No matches" : "No agent has reported yet. Start one here, or see the Connect page to point your own at this server."));
   },
 
   tools(p, d) {
@@ -841,7 +846,11 @@ const views = {
     const o = location.origin, id = p.id;
     const block = (key, title, why, code) => `<div class="box glass"><div class="row"><h2>${title}</h2><button class="btn small ghost" data-copy="${key}" data-fk="copy:${key}">Copy</button></div>
       <div class="sub">${why}</div><pre id="copy-${key}">${esc(code)}</pre></div>`;
-    return block("loop", "Run an agent nonstop", "Copy loop.py to the machine. It starts your harness fresh each round with this project's brief: the routine to follow plus where things stand right now. Everything after -- is your own harness command.",
+    return block("talk", "Run it by talking to Claude", "Nothing to install. Open Claude Code anywhere on this machine and paste this. It reads a short guide from the server and can then create projects, start and stop agents, queue tasks and tell you what needs you. It cannot approve a setup proposal or answer agents for you.",
+`Read ${o}/api/coordinator and act as my coordinator for HAUS. Start by telling me where my projects stand.`)
+    + block("talk-mcp", "Or connect it once, as tools", "One command, then the same abilities are built in to every Claude Code session on this machine.",
+`claude mcp add --transport http haus ${o}/mcp`)
+    + block("loop", "Run an agent nonstop", "Copy loop.py to the machine. It starts your harness fresh each round with this project's brief: the routine to follow plus where things stand right now. Everything after -- is your own harness command.",
 `export PROJECT_VIEW_URL=${o}
 python3 loop.py ${id} --agent vm-1/my-harness -- claude -p
 
@@ -898,7 +907,7 @@ function selecting() {
 }
 function render(force) {
   const { p, list, page } = route(), ev = p ? (S.events[p.id] || []) : [];
-  const sig = JSON.stringify([S.connected, S.loaded, p && p.id, page && page.id, S.q, [...S.open], S.filter, S.utab, S.limit, S.projects.map(x => [x.id, x.config, x.hold, (x.notable || []).length, (x.working || []).join()]), ev.length, Math.floor(Date.now() / 20000)]);
+  const sig = JSON.stringify([S.connected, S.loaded, p && p.id, page && page.id, S.q, [...S.open], S.filter, S.utab, S.limit, S.projects.map(x => [x.id, x.config, x.hold, (x.notable || []).length, (x.working || []).join(), JSON.stringify(x.launched || [])]), ev.length, Math.floor(Date.now() / 20000)]);
   // A background refresh must never pull the page out from under the reader: wait while text is selected or a
   // click is in progress (replacing a button between press and release would swallow the click).
   if (!force && (sig === lastSig || selecting() || pressing)) return;
@@ -1012,6 +1021,13 @@ document.addEventListener("click", async e => {
     b.disabled = true;
     await send("/api/events", { project: p.id, type: "task", id: t.id, text: t.text, status: b.dataset.status, agent: b.dataset.status === "queued" ? "" : t.agent, source: t.source, area: t.area });
   }
+  else if (b.dataset.stopAgent !== undefined) {
+    const { p } = route();
+    if (!p) return;
+    b.disabled = true;
+    if (await send("/api/stop", { project: p.id, agent: b.dataset.stopAgent })) toast(b.dataset.stopAgent ? `Stopped ${b.dataset.stopAgent}` : "Stopped all launched agents");
+  }
+  else if (b.dataset.opensettings) $("#gear").click();
   else if (b.dataset.act) await act(b);
   else if (b.dataset.copy) {
     const el = $("#copy-" + b.dataset.copy);
@@ -1059,7 +1075,19 @@ function renderSettings() {
   const { p } = route(), away = (p && p.config.away) || {}, theme = store.get("pv-theme", "dark");
   const pick = (attr, value, label, on) => `<button ${attr}="${value}" aria-pressed="${on}">${label}</button>`;
   const until = away.until ? new Date(away.until) : null;
-  $("#settings-body").innerHTML = (p ? `<h3>How ${esc(p.id)} runs</h3>
+  const recipeIds = p ? Object.keys(p.recipes || {}) : [], running = p ? (p.launched || []) : [];
+  if (!recipeIds.includes(S.launch.recipe)) S.launch.recipe = recipeIds[0] || "";
+  const agentsHtml = !p ? "" : `<h3>Agents on ${esc(p.id)}</h3>` + (recipeIds.length
+    ? `<div class="sub">Start with</div><div class="seg mt" role="group" aria-label="Launch recipe">${recipeIds.map(k => pick("data-launch-recipe", esc(k), esc(p.recipes[k]), S.launch.recipe === k)).join("")}</div>
+       <div class="sub">How many</div><div class="seg mt" role="group" aria-label="How many agents">${[1, 2, 3, 5].map(n => pick("data-launch-count", n, n, S.launch.count === n)).join("")}</div>
+       <div class="sub">Rounds each</div><div class="seg mt" role="group" aria-label="Rounds each">${[1, 2, 4, 8, 20].map(n => pick("data-launch-rounds", n, n, S.launch.rounds === n)).join("")}</div>
+       <div class="actions" style="margin-top:4px"><button class="btn small" data-launch-go="1" data-fk="launch-go">Start ${S.launch.count} agent${S.launch.count === 1 ? "" : "s"}</button>
+         <span class="sub">${p.config.phase === "survey" ? "This project is being set up, so one agent is enough to survey it." : "This uses your model allowance: " + S.launch.count * S.launch.rounds + " rounds in all."}</span></div>`
+    : `<div class="sub">Starting agents from here is switched off. To switch it on, copy <code>launchers.example.json</code> to <code>launchers.json</code> next to server.py and edit the command for your harness. Only commands listed in that file can ever be started.</div>`)
+    + (running.length ? `<div class="sub mt2">Started from this server</div>${running.map(r => `<div class="card"><div class="row"><span class="tags"><span class="pill ${r.alive ? "ok" : ""}">${r.alive ? "Running" : "Finished"}</span><b style="font-weight:500">${esc(r.agent)}</b></span>
+        ${r.alive ? `<button class="btn small ghost" data-stop-agent="${esc(r.agent)}" data-fk="stop:${esc(r.agent)}">Stop</button>` : `<span class="sub">${ago(r.started).toLowerCase()}</span>`}</div></div>`).join("")}
+        ${running.filter(r => r.alive).length > 1 ? `<div class="actions"><button class="btn small ghost" data-stop-agent="" data-fk="stop-all">Stop all</button></div>` : ""}` : "");
+  $("#settings-body").innerHTML = agentsHtml + (p ? `<h3>How ${esc(p.id)} runs</h3>
       <div class="sub">Agents working at the same time</div><div class="seg mt" role="group" aria-label="Agents working at the same time">${[[0, "No limit"], [1, "1"], [2, "2"], [3, "3"], [5, "5"]].map(([n, label]) => pick("data-away-agents", n, label, (away.max_agents || 0) === n)).join("")}</div>
       <div class="sub" style="margin-bottom:14px">${(p.working || []).length ? "Working now: " + esc(p.working.join(", ")) + "." : "No agent holds a slot right now."} An agent over the limit finishes its round, then waits its turn.</div>
       <div class="sub">If something needs you</div><div class="seg mt" role="group" aria-label="If something needs you">${pick("data-away-block", "continue", "Keep working on other things", away.when_blocked !== "pause")}${pick("data-away-block", "pause", "Stop until I respond", away.when_blocked === "pause")}</div>
@@ -1083,7 +1111,14 @@ $("#settings").addEventListener("click", async e => {
   if (e.target === $("#settings")) return $("#settings").close();
   const b = e.target.closest("button"), { p } = route();
   if (!b) return;
-  if (b.dataset.themePick) { applyTheme(b.dataset.themePick); renderSettings(); }
+  if (b.dataset.launchRecipe) { S.launch.recipe = b.dataset.launchRecipe; renderSettings(); }
+  else if (b.dataset.launchCount) { S.launch.count = Number(b.dataset.launchCount); renderSettings(); }
+  else if (b.dataset.launchRounds) { S.launch.rounds = Number(b.dataset.launchRounds); renderSettings(); }
+  else if (b.dataset.launchGo && p) {
+    b.disabled = true;
+    if (await send("/api/launch", { project: p.id, recipe: S.launch.recipe, count: S.launch.count, rounds: S.launch.rounds })) toast(`Started ${S.launch.count} agent${S.launch.count === 1 ? "" : "s"} on ${p.id}`);
+  }
+  else if (b.dataset.themePick) { applyTheme(b.dataset.themePick); renderSettings(); }
   else if (b.dataset.notify !== undefined) {
     S.notify = b.dataset.notify === "1" && "Notification" in window && (await Notification.requestPermission()) === "granted";
     if (b.dataset.notify === "1" && !S.notify) toast("Notifications are blocked for this page in your browser.");
@@ -1167,7 +1202,7 @@ $("#np-form").addEventListener("submit", async e => {
   e.preventDefault();
   const project = $("#np-name").value.trim();
   $("#np-ok").disabled = true;
-  const ok = await send("/api/new", { project, target: $("#np-target").value.trim(), goal: $("#np-goal").value.trim() });
+  const ok = await send("/api/new", { project, target: $("#np-target").value.trim(), goal: $("#np-goal").value.trim(), agent_files: $("#np-files").value.trim() });
   $("#np-ok").disabled = false;
   if (ok) { $("#np").close(); location.hash = href(project, "understand"); }
 });

@@ -18,10 +18,15 @@ What a harness can call (from another machine, send "Authorization: Bearer <toke
   GET  /api/brief?project=X&agent=NAME                           plain-text instructions plus current state
   GET  /api/runs?project=X&agent=NAME                            that agent's runs with the verifier's decision
   GET  /api/found?project=X                                      what is confirmed and what is awaiting the verifier
+  GET  /api/coordinator                                           plain-text guide for a chat agent that will run this server for you
+  POST /api/coordinate {"tool", "args"}                            the coordinator's tools without MCP (this machine or coordinator)
+  POST /api/launch   {"project", "recipe", "count", "rounds"}     start agents from a recipe in launchers.json (this machine or coordinator)
+  POST /api/stop     {"project", "agent"}                         stop launched agents
   POST /mcp                                                     the same as MCP tools
 
 Trust: requests from this machine are fully trusted. Remote writers need PROJECT_VIEW_TOKEN.
 Only the verifier may post verdicts: from another machine it needs PROJECT_VIEW_VERIFIER_TOKEN.
+The coordinator's tools (create projects, start and stop agents, change run settings) need PROJECT_VIEW_COORDINATOR_TOKEN remotely.
 The scoring command lives in project.json and can only be changed by editing that file by hand.
 Reading (the page and the GET endpoints) is open to anyone who can reach the port.
 """
@@ -30,6 +35,9 @@ import hmac
 import json
 import os
 import re
+import shutil
+import signal
+import subprocess
 import sys
 import threading
 import time
@@ -43,6 +51,7 @@ PROJECTS = ROOT / "projects"
 PORT = int(os.environ.get("PROJECT_VIEW_PORT", 8765))
 TOKEN = os.environ.get("PROJECT_VIEW_TOKEN", "")
 VERIFIER_TOKEN = os.environ.get("PROJECT_VIEW_VERIFIER_TOKEN", "")
+COORDINATOR_TOKEN = os.environ.get("PROJECT_VIEW_COORDINATOR_TOKEN", "")
 LOCAL = ("127.0.0.1", "::1")
 LOCK = threading.RLock()
 NAME = re.compile(r"^\w[\w.-]{0,79}$")
@@ -407,6 +416,125 @@ def clean_diagram(d):
     return {"nodes": nodes, "edges": edges}
 
 
+# ---------- launching agents from the server ----------
+# Off unless launchers.json exists. That file lists named recipes, each an exact harness command, and is only ever
+# written by hand. The page and the coordinator can start and stop those recipes; they can never supply a command.
+
+LAUNCH_FILE = ROOT / "launchers.json"
+RUNNING = {}  # (project, agent) -> {"proc", "recipe", "started", "ended"}
+MAX_RUNNING = 8
+
+
+def recipes():
+    try:
+        data = json.loads(LAUNCH_FILE.read_text())
+    except (OSError, ValueError):
+        return {}
+    ok = lambda v: isinstance(v, dict) and isinstance(v.get("command"), list) and v["command"] and all(isinstance(x, str) for x in v["command"])
+    return {k: v for k, v in data.items() if NAME.match(str(k)) and ok(v)} if isinstance(data, dict) else {}
+
+
+def launched(project=None):
+    """Agents this server started: still running, or finished in the last ten minutes."""
+    out, now = [], time.time()
+    with LOCK:
+        for key, r in list(RUNNING.items()):
+            alive = r["proc"].poll() is None
+            if not alive:
+                r.setdefault("ended", now)
+                if now - r["ended"] > 600:
+                    del RUNNING[key]
+                    continue
+            if project in (None, key[0]):
+                out.append({"project": key[0], "agent": key[1], "recipe": r["recipe"], "alive": alive, "started": r["started"]})
+    return out
+
+
+def launch(data):
+    project, wanted = check_name(data.get("project")), recipes()
+    if not (PROJECTS / project).is_dir():
+        raise ValueError("no such project")
+    if not wanted:
+        raise ValueError("launching is off: create launchers.json next to server.py (see launchers.example.json)")
+    name = data.get("recipe")
+    if name not in wanted:
+        raise ValueError("recipe must be one of: " + ", ".join(wanted))
+    recipe = wanted[name]
+    count = data.get("count", 1)
+    rounds = data.get("rounds", recipe.get("rounds", 4))
+    if not (isinstance(count, int) and 1 <= count <= 5 and isinstance(rounds, int) and 1 <= rounds <= 500):
+        raise ValueError("count must be 1 to 5 and rounds 1 to 500")
+    started = []
+    with LOCK:
+        alive = [k for k, r in RUNNING.items() if r["proc"].poll() is None]
+        if len(alive) + count > MAX_RUNNING:
+            raise ValueError(f"at most {MAX_RUNNING} launched agents may run at once; {len(alive)} are running")
+        taken, n = {a for (p, a) in alive if p == project}, 1
+        for _ in range(count):
+            while f"{name}-{n}" in taken:
+                n += 1
+            agent = f"{name}-{n}"
+            taken.add(agent)
+            work = ROOT / "agent-work" / project / agent
+            fresh = not work.exists()
+            work.mkdir(parents=True, exist_ok=True)
+            seed = config(project).get("agent_files")
+            if fresh and seed and Path(seed).is_dir():  # what each agent starts with: a copy of the target, a spec
+                shutil.copytree(seed, work, dirs_exist_ok=True)
+            env = {k: v for k, v in os.environ.items() if k not in ("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT")}
+            env["PROJECT_VIEW_URL"] = f"http://127.0.0.1:{PORT}"
+            command = [sys.executable, str(ROOT / "loop.py"), project, "--agent", agent, "--harness", str(recipe.get("label") or name),
+                       "--max-iterations", str(rounds), "--timeout-min", str(recipe.get("timeout_min", 10)), "--"] + recipe["command"]
+            log = open(work / "loop.log", "a")
+            proc = subprocess.Popen(command, cwd=work, env=env, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+            RUNNING[(project, agent)] = {"proc": proc, "recipe": name, "started": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")}
+            started.append(agent)
+    return {"started": started, "rounds": rounds, "recipe": name}
+
+
+def stop(data):
+    """Stop one launched agent, or every launched agent on the project. Ends the loop and whatever harness it is running."""
+    project, agent, stopped = check_name(data.get("project")), data.get("agent"), []
+    with LOCK:
+        for (p, a), r in list(RUNNING.items()):
+            if p == project and agent in (None, "", a) and r["proc"].poll() is None:
+                try:
+                    os.killpg(r["proc"].pid, signal.SIGTERM)
+                except OSError:
+                    pass
+                stopped.append(a)
+    for a in stopped:
+        SLOTS.get(project, {}).pop(a, None)
+        ingest({"project": project, "type": "activity", "text": "Loop stopped: stopped by the person", "agent": a})
+    return {"stopped": stopped}
+
+
+def status(project):
+    """A plain-language summary of one project, for the coordinator to read out."""
+    cfg, events = config(check_name(project)), list(load(project))
+    if not (PROJECTS / project).is_dir():
+        raise ValueError("no such project")
+    f, tasks, questions = found(project), merged(events, "task"), merged(events, "question")
+    count = lambda st: sum(1 for t in tasks.values() if t.get("status") == st)
+    lines = [f'Project "{project}" ({"being set up" if cfg.get("phase") == "survey" else "running"})',
+             "Goal: " + (cfg.get("goal") or "not set yet"),
+             "On hold: " + (hold(project) or "no"),
+             f'Confirmed results: {len(f["confirmed"])}' + (" (" + ", ".join(f["confirmed"][:12]) + ")" if f["confirmed"] else ""),
+             f'Awaiting the verifier: {len(f["awaiting_the_verifier"])}',
+             f'Tasks: {count("queued")} queued, {count("running")} running, {count("review")} waiting for the person, {count("done")} done',
+             "Agents active in the last ten minutes: " + (", ".join(active_agents(project, events)) or "none"),
+             "Agents launched from this server: " + (", ".join(f'{x["agent"]} ({"running" if x["alive"] else "finished"})' for x in launched(project)) or "none")]
+    needs = [n for n in notable(project) if n["open"]]
+    lines += ["Needs the person:"] + [f'  - {n["text"]}' for n in needs] if needs else ["Nothing is waiting on the person."]
+    asks = [q for q in questions.values() if q["asker"] != "you" and not q.get("answer")]
+    if asks:
+        lines += ["Open questions from agents (id: text):"] + [f'  - {q["id"]}: {q.get("text", "")}' for q in asks]
+    finds = [e for e in events if e["type"] == "finding"][-6:]
+    if finds:
+        lines += ["Latest findings:"] + [f'  - {e.get("agent") or "?"}: {e.get("text", "")}' for e in finds]
+    return "\n".join(lines)
+
+
 def new_project(data):
     """Start a project in its setup phase: a survey agent studies the target and proposes the rest."""
     project = check_name(data.get("project"))
@@ -418,7 +546,8 @@ def new_project(data):
             raise ValueError("a project with that name already exists")
         (PROJECTS / project).mkdir(parents=True)
         (PROJECTS / project / "project.json").write_text(json.dumps(
-            {"phase": "survey", "target": target, "goal": str(data.get("goal") or "").strip()[:2000], "sections": []}, indent=2) + "\n")
+            {"phase": "survey", "target": target, "goal": str(data.get("goal") or "").strip()[:2000], "sections": [],
+             **({"agent_files": str(data["agent_files"])[:500]} if data.get("agent_files") else {})}, indent=2) + "\n")
         load(project)
     return public_config(project)
 
@@ -906,17 +1035,122 @@ MCP_TOOLS = [
 ]
 
 
-def mcp(msg, ip, verifier, base=""):
+P = {"project": {"type": "string"}}
+COORDINATOR_TOOLS = [
+    {"name": "list_projects", "description": "Every project on this HAUS server with its phase, goal and whether it is on hold. Start here.",
+     "inputSchema": {"type": "object", "properties": {}}},
+    {"name": "project_status", "description": "Where one project stands: confirmed results, tasks, live agents, what needs the person, open questions, latest findings.",
+     "inputSchema": {"type": "object", "required": ["project"], "properties": P}},
+    {"name": "read_understanding", "description": "The project's Understanding page: what the target is and how it works, as written by agents and checked by the person.",
+     "inputSchema": {"type": "object", "required": ["project"], "properties": P}},
+    {"name": "create_project", "description": "Start a new project in its setup phase. target is the person's own description of what to study and where it lives. "
+     "A survey agent must then be started; its proposal has to be approved by the person on the page, which you cannot do.",
+     "inputSchema": {"type": "object", "required": ["project", "target"], "properties": {
+         **P, "target": {"type": "string"}, "goal": {"type": "string"}, "agent_files": {"type": "string", "description": "A folder whose contents every launched agent starts with"}}}},
+    {"name": "add_task", "description": "Queue a task for the agents, in the person's words. The next free agent takes it.",
+     "inputSchema": {"type": "object", "required": ["project", "text"], "properties": {**P, "text": {"type": "string"}}}},
+    {"name": "relay_answer", "description": "Pass on the person's answer to a question an agent asked. Use only words the person actually gave you; never answer for them.",
+     "inputSchema": {"type": "object", "required": ["project", "question_id", "answer"], "properties": {**P, "question_id": {"type": "string"}, "answer": {"type": "string"}}}},
+    {"name": "set_run_settings", "description": "Pause or resume a project, cap how many agents work at once (0 for no limit), choose whether agents stop when "
+     "something needs the person, and set how many hours they may keep running (0 for no limit).",
+     "inputSchema": {"type": "object", "required": ["project"], "properties": {
+         **P, "paused": {"type": "boolean"}, "max_agents": {"type": "integer"}, "stop_when_blocked": {"type": "boolean"}, "hours": {"type": "number"}}}},
+    {"name": "list_launchers", "description": "The launch recipes this server allows, and the agents it has started.", "inputSchema": {"type": "object", "properties": {}}},
+    {"name": "start_agents", "description": "Start agents on a project from a named launch recipe. This spends the person's model usage, so confirm the count and rounds with them first.",
+     "inputSchema": {"type": "object", "required": ["project", "recipe"], "properties": {**P, "recipe": {"type": "string"}, "count": {"type": "integer"}, "rounds": {"type": "integer"}}}},
+    {"name": "stop_agents", "description": "Stop one launched agent, or all launched agents on the project if no agent is named.",
+     "inputSchema": {"type": "object", "required": ["project"], "properties": {**P, "agent": {"type": "string"}}}},
+]
+
+
+def coordinate(name, args):
+    """The coordinator's tools: what the person could do on the page, except approving a setup proposal."""
+    if not any(t["name"] == name for t in COORDINATOR_TOOLS):
+        raise ValueError(f"there is no tool named {name!r}. Approving a setup proposal is deliberately not available: the person does that on the page.")
+    if name == "list_projects":
+        return [{"project": p, "phase": config(p).get("phase", "run"), "goal": config(p).get("goal", ""), "on_hold": hold(p),
+                 "needs_the_person": sum(1 for n in notable(p) if n["open"])} for p in project_ids()]
+    if name == "list_launchers":
+        return {"recipes": {k: v.get("label", k) for k, v in recipes().items()}, "launched": launched()}
+    project = check_name(args.get("project"))
+    if name == "create_project":
+        return new_project(args)
+    if not (PROJECTS / project).is_dir():
+        raise ValueError("no such project; use list_projects")
+    if name == "project_status":
+        return status(project)
+    if name == "read_understanding":
+        return "\n\n".join(f'## {u["key"]}  [{u["label"]}]\n{u["body"]}' for u in understanding(list(load(project)))) or "Nothing has been written yet."
+    if name == "add_task":
+        return ingest({"project": project, "type": "task", "text": args.get("text"), "status": "queued", "source": "you"})
+    if name == "relay_answer":
+        if not str(args.get("answer") or "").strip():
+            raise ValueError("answer is required")
+        return ingest({"project": project, "type": "question", "id": args.get("question_id"), "answer": args["answer"], "source": "you"})
+    if name == "set_run_settings":
+        away = dict(config(project).get("away") or {})
+        if "max_agents" in args:
+            away.pop("max_agents", None) if not args["max_agents"] else away.update(max_agents=args["max_agents"])
+        if "stop_when_blocked" in args:
+            away["when_blocked"] = "pause" if args["stop_when_blocked"] else "continue"
+        if "hours" in args:
+            away.pop("until", None)
+            if args["hours"]:
+                away["until"] = (dt.datetime.now(dt.timezone.utc) + dt.timedelta(hours=float(args["hours"]))).isoformat(timespec="seconds")
+        return set_project({"project": project, "away": away, **({"paused": bool(args["paused"])} if "paused" in args else {})})
+    if name == "start_agents":
+        return launch({"project": project, "recipe": args.get("recipe"), "count": args.get("count", 1), **({"rounds": args["rounds"]} if "rounds" in args else {})})
+    if name == "stop_agents":
+        return stop({"project": project, "agent": args.get("agent")})
+    raise ValueError("unknown tool")
+
+
+def coordinator_guide(base):
+    """Everything a chat agent needs to run this server for the person, with nothing to install: it only needs to make HTTP
+    requests. The person says "read <this address> and help me with my projects"."""
+    call = f"curl -s -X POST {base}/api/coordinate -H 'Content-Type: application/json' -d"
+    out = [f"You are the person's coordinator for HAUS, a server at {base} that runs and tracks AI agent research projects.",
+           f"The person watches everything on the page at {base} ; you act for them by calling the tools below.",
+           "",
+           "HOW TO CALL A TOOL",
+           f"  {call} '{{\"tool\": \"<name>\", \"args\": {{...}}}}'",
+           "From another machine, add:  -H \"Authorization: Bearer $PROJECT_VIEW_COORDINATOR_TOKEN\"",
+           "",
+           "TOOLS"]
+    for t in COORDINATOR_TOOLS:
+        props = t["inputSchema"].get("properties", {})
+        need = set(t["inputSchema"].get("required", []))
+        args = ", ".join(f'{k}{"" if k in need else "?"}' for k in props) or "no arguments"
+        out += [f'- {t["name"]} ({args})', f'    {t["description"]}']
+    out += ["",
+            "RULES",
+            "- Start with list_projects, then project_status for the one the person means. Tell them what you see in plain words.",
+            "- Starting agents spends the person's model usage. Say how many agents and rounds you are about to start, and wait for a yes.",
+            "- You cannot approve a setup proposal. That saves and runs a script an agent wrote, so the person must read it and",
+            f"  approve it themselves on the page ({base}). Tell them when one is waiting.",
+            "- Never answer an agent's question for the person. Read it out, and use relay_answer only with the answer they give you.",
+            "- A new project starts in setup: create_project, then start ONE agent to survey it, then wait for the person to approve.",
+            "- After you change something, check project_status again and report what actually happened.",
+            "",
+            "RIGHT NOW"]
+    out += [f'- {p["project"]}: {p["phase"]}' + (f', on hold ({p["on_hold"]})' if p["on_hold"] else "") + (f', {p["needs_the_person"]} waiting on the person' if p["needs_the_person"] else "")
+            for p in coordinate("list_projects", {})] or ["- no projects yet"]
+    r = recipes()
+    out += ["Launch recipes: " + (", ".join(f"{k} ({v.get('label', k)})" for k, v in r.items()) if r else "none; launching is off until the person creates launchers.json")]
+    return "\n".join(out) + "\n"
+
+
+def mcp(msg, ip, verifier, base="", coordinator=False):
     method, params = msg.get("method"), msg.get("params") or {}
     if "id" not in msg:
         return None
     if method == "initialize":
         result = {"protocolVersion": params.get("protocolVersion", "2025-03-26"), "capabilities": {"tools": {}},
-                  "serverInfo": {"name": "project-view", "version": "0.2"}}
+                  "serverInfo": {"name": "haus", "version": "0.3"}}
     elif method == "ping":
         result = {}
     elif method == "tools/list":
-        result = {"tools": MCP_TOOLS}
+        result = {"tools": MCP_TOOLS + (COORDINATOR_TOOLS if coordinator else [])}
     elif method == "tools/call":
         name, args = params.get("name"), params.get("arguments") or {}
         try:
@@ -932,6 +1166,8 @@ def mcp(msg, ip, verifier, base=""):
                 out = runs_for(args.get("project"), args.get("agent") or "")
             elif name == "get_brief":
                 out = brief(args.get("project"), args.get("agent"), base)
+            elif coordinator and any(t["name"] == name for t in COORDINATOR_TOOLS):
+                out = coordinate(name, args)
             else:
                 raise ValueError("unknown tool")
             result = {"content": [{"type": "text", "text": out if isinstance(out, str) else json.dumps(out)}]}
@@ -962,6 +1198,8 @@ class Handler(BaseHTTPRequestHandler):
         given = self.headers.get("Authorization", "").encode()
         if VERIFIER_TOKEN and hmac.compare_digest(given, b"Bearer " + VERIFIER_TOKEN.encode()):
             return "verifier"
+        if COORDINATOR_TOKEN and hmac.compare_digest(given, b"Bearer " + COORDINATOR_TOKEN.encode()):
+            return "coordinator"
         if TOKEN and hmac.compare_digest(given, b"Bearer " + TOKEN.encode()):
             return "agent"
         return None
@@ -974,7 +1212,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.reply(200, (ROOT / "index.html").read_bytes(), "text/html; charset=utf-8")
             elif url.path == "/api/projects":
                 # epoch changes on every server start, so an open page knows to refetch instead of mixing two logs
-                self.reply(200, [{"id": p, "config": public_config(p), "count": len(load(p)), "epoch": BOOT, "hold": hold(p), "notable": notable(p), "working": sorted(a for a, t in SLOTS.get(p, {}).items() if t > time.time())} for p in project_ids()])
+                self.reply(200, [{"id": p, "config": public_config(p), "count": len(load(p)), "epoch": BOOT, "hold": hold(p), "notable": notable(p), "working": sorted(a for a, t in SLOTS.get(p, {}).items() if t > time.time()),
+                                  "launched": launched(p), "recipes": {k: v.get("label", k) for k, v in recipes().items()}} for p in project_ids()])
             elif url.path == "/api/events":
                 events, after = load(check_name(arg("project"))), max(0, int(arg("after") or 0))
                 self.reply(200, {"events": events[after:after + 5000]})
@@ -982,6 +1221,10 @@ class Handler(BaseHTTPRequestHandler):
                 self.reply(200, pending(arg("project")))
             elif url.path == "/api/project":
                 self.reply(200, {**public_config(check_name(arg("project"))), "hold": hold(arg("project"))})
+            elif url.path == "/mcp":
+                self.reply(405, {"error": "this endpoint takes POST only"})
+            elif url.path == "/api/coordinator":
+                self.reply(200, coordinator_guide(self.base()).encode(), "text/plain; charset=utf-8")
             elif url.path == "/api/found":
                 self.reply(200, found(arg("project")))
             elif url.path == "/api/runs":
@@ -1016,12 +1259,21 @@ class Handler(BaseHTTPRequestHandler):
                 out = set_project(data)
             elif path == "/api/slot":
                 out = slot(data)
+            elif path == "/api/coordinate":  # the coordinator's tools for callers that do not speak MCP
+                if ip not in LOCAL and role != "coordinator":
+                    raise PermissionError("only this machine, or a caller with the coordinator token, may do this")
+                out = coordinate(str(data.get("tool")), data.get("args") if isinstance(data.get("args"), dict) else {})
+                out = {"result": out}
+            elif path in ("/api/launch", "/api/stop"):  # starting and stopping agents: this machine, or the coordinator
+                if ip not in LOCAL and role != "coordinator":
+                    raise PermissionError("only the page on the server's own machine, or the coordinator, may do this")
+                out = launch(data) if path == "/api/launch" else stop(data)
             elif path in ("/api/new", "/api/approve"):  # the person's own decisions: this machine only, whatever token is sent
                 if ip not in LOCAL:
                     raise PermissionError("only the page on the server's own machine may do this")
                 out = new_project(data) if path == "/api/new" else approve(data)
             elif path == "/mcp":
-                out = mcp(data, ip, role == "verifier", self.base())
+                out = mcp(data, ip, role == "verifier", self.base(), coordinator=ip in LOCAL or role == "coordinator")
                 if out is None:
                     return self.reply(202, b"")
             else:

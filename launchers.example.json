@@ -1,0 +1,8 @@
+{
+  "claude-sonnet": {
+    "label": "Claude Code (Sonnet)",
+    "command": ["claude", "-p", "--model", "sonnet", "--allowedTools", "Bash(curl:*)", "Bash(python3:*)", "Read", "Write", "Edit"],
+    "rounds": 4,
+    "timeout_min": 10
+  }
+}
