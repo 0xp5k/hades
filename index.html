@@ -1,0 +1,1190 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark light">
+<script>
+  // Set the theme before anything paints. Dark is the default.
+  (function () { var t = null; try { t = JSON.parse(localStorage.getItem("pv-theme")); } catch (e) {}
+    if (t === "system") t = matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
+    if (t !== "light") t = "dark";  // dark unless the person picked light, or picked "match my system" on a light system
+    document.documentElement.dataset.theme = t; })();
+</script>
+<title>Project View</title>
+<style>
+  /* Two themes, one set of names. Black, white and true greys only: no hue in any neutral. The only colour on the page
+     is green for "good" and red for "wrong", and each of those always comes with a word as well. */
+  :root {
+    --bg: #000000; --glass: rgba(255,255,255,.06); --glass-2: rgba(255,255,255,.04); --card: rgba(255,255,255,.065); --card-2: rgba(255,255,255,.14); --solid: #1a1a1a;
+    --hair: rgba(255,255,255,.14); --hair-2: rgba(255,255,255,.3); --shine: rgba(255,255,255,.1); --tick: rgba(255,255,255,.1); --fog: rgba(255,255,255,.13);
+    --inset: rgba(0,0,0,.42); --overlay: rgba(16,16,16,.78);
+    --fg: #ffffff; --muted: #a8a8a8; --faint: #787878; --ink: #000000; --thumb: rgba(255,255,255,.2);
+    --ok: #6fd69f; --info: #d6d6d6; --bad: #ff7a7a;
+    --r-lg: 14px; --r-md: 9px; --blur: blur(18px) saturate(115%);
+  }
+  :root[data-theme="light"] {
+    --bg: #ffffff; --glass: rgba(255,255,255,.62); --glass-2: rgba(255,255,255,.5); --card: rgba(0,0,0,.045); --card-2: rgba(0,0,0,.11); --solid: #f2f2f2;
+    --hair: rgba(0,0,0,.15); --hair-2: rgba(0,0,0,.36); --shine: rgba(255,255,255,.9); --tick: rgba(0,0,0,.16); --fog: rgba(0,0,0,.1);
+    --inset: rgba(0,0,0,.055); --overlay: rgba(255,255,255,.82);
+    --fg: #000000; --muted: #4f4f4f; --faint: #767676; --ink: #ffffff; --thumb: rgba(0,0,0,.24);
+    --ok: #0f7a47; --info: #2b2b2b; --bad: #c21f1f;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  /* The backdrop: a field of short vertical ticks, with two soft patches of light so the glass has something to catch.
+     One layer draws thin columns, the layer above cuts them into dashes. */
+  body { margin: 0; color: var(--fg); font: 15px/1.5 Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; -webkit-font-smoothing: antialiased;
+    display: grid; grid-template-columns: 84px minmax(0, 1fr); overflow: hidden; background-color: var(--bg);
+    background-image: radial-gradient(55% 45% at 88% -6%, var(--fog), transparent 70%), radial-gradient(50% 45% at 4% 104%, var(--fog), transparent 70%),
+      repeating-linear-gradient(0deg, var(--bg) 0 6px, transparent 6px 16px), repeating-linear-gradient(90deg, var(--tick) 0 1.5px, transparent 1.5px 9px); }
+  /* Real glass: every panel is translucent and blurs the ticks behind it, with a hairline edge and a faint top highlight.
+     Text always sits on a panel, never directly on the pattern, so it stays readable. */
+  .glass { border: 1px solid var(--hair); box-shadow: inset 0 1px 0 var(--shine); backdrop-filter: var(--blur); -webkit-backdrop-filter: var(--blur); }
+  ::-webkit-scrollbar { width: 10px; height: 10px; }
+  ::-webkit-scrollbar-thumb { background: var(--thumb); border-radius: 9px; border: 2px solid transparent; background-clip: padding-box; }
+  ::-webkit-scrollbar-corner { background: transparent; }
+  :focus-visible { outline: 2px solid var(--fg); outline-offset: 2px; }
+  button, input, select { font: inherit; color: inherit; }
+  a { color: inherit; }
+
+  /* ---- rail ---- */
+  .rail { background: var(--glass-2); border-width: 0 1px 0 0; display: flex; flex-direction: column; align-items: center; gap: 4px;
+    padding: 18px 0 14px; height: 100vh; height: 100dvh; overflow-y: auto; scrollbar-width: none; }
+  .rail::-webkit-scrollbar { display: none; }
+  .logo { width: 44px; height: 44px; border-radius: var(--r-lg); background: var(--fg); color: var(--ink); display: grid; place-items: center; margin-bottom: 14px; flex: none; }
+  .rail a { width: 68px; padding: 8px 2px 6px; border-radius: var(--r-md); display: flex; flex-direction: column; align-items: center; gap: 4px;
+    color: var(--faint); text-decoration: none; font-size: 10.5px; line-height: 1.2; flex: none; transition: color .12s, background .12s; }
+  .rail a span { max-width: 64px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .rail a:hover { color: var(--fg); background: var(--card); }
+  .rail a.on { color: var(--fg); background: var(--card-2); }
+  .rail .push { margin-top: auto; }
+  svg.i { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; flex: none; }
+
+  /* ---- top bar ---- */
+  main { height: 100vh; height: 100dvh; overflow: auto; padding: 18px 28px 48px; }
+  .top { display: flex; gap: 10px; align-items: center; margin-bottom: 26px; flex-wrap: wrap; }
+  .field { background: var(--glass-2); border-radius: var(--r-md); padding: 10px 14px; min-width: 0; }
+  .field::placeholder { color: var(--faint); }
+  #q { flex: 1 1 220px; max-width: 360px; }
+  select.field { appearance: none; -webkit-appearance: none; padding-right: 34px; max-width: 260px; text-overflow: ellipsis; cursor: pointer;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' fill='none' stroke='%23808893' stroke-width='1.8' stroke-linecap='round'%3E%3Cpath d='M1 1.5l5 5 5-5'/%3E%3C/svg%3E");
+    background-repeat: no-repeat; background-position: right 13px center; }
+  select.field option { background: var(--glass); color: var(--fg); }
+  .grow { flex: 1 1 0; }
+  .btn { background: var(--fg); color: var(--ink); border: 0; border-radius: var(--r-md); font-weight: 600; padding: 10px 16px; cursor: pointer; white-space: nowrap; transition: opacity .12s; }
+  .btn:hover { opacity: .88; } .btn:disabled { opacity: .5; cursor: default; }
+  .btn.ghost { background: none; color: var(--muted); font-weight: 500; }
+  .btn.small { padding: 5px 12px; border-radius: 6px; font-size: 13px; }
+  .btn.small.ghost { background: var(--card); color: var(--fg); }
+
+  /* ---- type and shared pieces ---- */
+  .head { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; margin-bottom: 6px; }
+  h1 { font-size: 26px; font-weight: 500; margin: 0; letter-spacing: -.01em; }
+  .goal { color: var(--muted); margin: 0 0 22px; max-width: 78ch; overflow-wrap: anywhere; }
+  h2 { font-size: 15px; font-weight: 500; margin: 0 0 12px; display: flex; align-items: center; gap: 8px; min-width: 0; overflow-wrap: anywhere; }
+  .pill { display: inline-block; font-size: 12px; font-weight: 500; line-height: 1.5; padding: 1px 8px; border-radius: 4px; background: var(--card); color: var(--muted);
+    white-space: nowrap; max-width: 100%; overflow: hidden; text-overflow: ellipsis; vertical-align: middle; }
+  .pill.solid { background: var(--fg); color: var(--ink); }
+  .pill.ok { color: var(--ok); } .pill.info { color: var(--info); } .pill.bad { color: var(--bad); }
+  .box { background: var(--glass); border-radius: var(--r-lg); padding: 18px; margin-bottom: 16px; min-width: 0; }
+  .card { background: var(--card); border-radius: var(--r-md); padding: 12px 14px; margin-bottom: 8px; overflow-wrap: anywhere; }
+  .card:last-child { margin-bottom: 0; }
+  .row { display: flex; justify-content: space-between; gap: 10px; align-items: center; min-width: 0; }
+  .row > h2 { margin: 0; }
+  .tags { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; min-width: 0; }
+  .sub { color: var(--muted); font-size: 13px; overflow-wrap: anywhere; }
+  .nowrap { white-space: nowrap; flex: none; }
+  .mt { margin-top: 8px; } .mt2 { margin-top: 12px; }
+  .empty { color: var(--faint); padding: 4px 2px; }
+  .link { background: none; border: 0; padding: 0; font-size: 13px; color: var(--fg); text-decoration: underline; text-underline-offset: 3px; cursor: pointer; }
+  pre { white-space: pre-wrap; overflow-wrap: anywhere; font: 12.5px/1.55 ui-monospace, SFMono-Regular, Menlo, monospace; background: var(--inset);
+    border-radius: var(--r-md); padding: 12px; margin: 10px 0 0; color: var(--fg); max-height: 320px; overflow: auto; }
+  code { font: 12.5px ui-monospace, SFMono-Regular, Menlo, monospace; background: var(--inset); padding: 1px 6px; border-radius: 6px; }
+  .num { font-variant-numeric: tabular-nums; }
+  .md { overflow-wrap: anywhere; max-width: 82ch; line-height: 1.6; }
+  .md > * { margin: 0 0 .75em; } .md > :last-child { margin-bottom: 0; }
+  .md h3 { font-size: 15px; font-weight: 600; margin-top: 1.1em; } .md > h3:first-child { margin-top: 0; }
+  .md ul, .md ol { padding-left: 1.3em; } .md li { margin-bottom: .3em; } .md li::marker { color: var(--faint); }
+  .md a { text-decoration: underline; text-underline-offset: 3px; }
+  .md table { min-width: 0; font-size: 14px; } .md th, .md td { padding: 7px 16px 7px 0; vertical-align: top; }
+  .md pre { margin-top: 0; }
+  .md.inset { background: var(--inset); border-radius: var(--r-md); padding: 12px 14px; margin-top: 10px; font-size: 14px; }
+  .legend { display: inline-flex; align-items: center; gap: 7px; font-size: 13px; color: var(--muted); margin-right: 10px; }
+  .legend b { color: var(--fg); font-weight: 500; }
+  .btn.quiet { background: var(--card); color: var(--fg); font-weight: 500; }
+  .btn.quiet:hover { background: var(--card-2); opacity: 1; }
+
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--ok); flex: none; animation: pulse 1.8s ease-in-out infinite; }
+  .dot.idle { background: var(--faint); animation: none; }
+  @keyframes pulse { 50% { opacity: .3; } }
+  @media (prefers-reduced-motion: reduce) { .dot { animation: none; } * { transition: none !important; } }
+
+  .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin-bottom: 16px; }
+  .tile { background: var(--glass); border-radius: var(--r-lg); padding: 15px 18px; text-decoration: none; display: block; transition: background .12s; min-width: 0; }
+  a.tile:hover { background: var(--solid); }
+  .tile b { display: block; font-size: 27px; font-weight: 500; letter-spacing: -.01em; font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .cols { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 16px; align-items: start; }
+  .cols > div > .box:last-child { margin-bottom: 0; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(290px, 1fr)); gap: 12px; }
+  .grid .box { margin: 0; }
+  .scroll { max-height: 420px; overflow: auto; margin-right: -6px; padding-right: 6px; }
+  .live { display: flex; align-items: center; gap: 10px; padding: 5px 0; min-width: 0; }
+  .live .what { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+  .need { display: flex; gap: 10px; align-items: baseline; padding: 9px 0; border-top: 1px solid var(--hair); text-decoration: none; }
+  .need:first-of-type { border-top: 0; padding-top: 2px; } .need:last-child { padding-bottom: 0; }
+  .need:hover .txt { text-decoration: underline; text-underline-offset: 3px; }
+  .need .pill { flex: none; }
+  svg.chart { display: block; width: 100%; height: auto; }
+  .bar { display: flex; height: 8px; border-radius: 99px; overflow: hidden; background: var(--card); margin: 12px 0 10px; gap: 2px; }
+  .bar i { display: block; min-width: 0; } .bar .e { background: var(--fg); } .bar .p { background: var(--info); }
+
+  .seg { display: inline-flex; gap: 2px; padding: 3px; border-radius: var(--r-md); background: var(--glass); border: 1px solid var(--hair); flex-wrap: wrap; margin-bottom: 14px; }
+  .seg button { background: none; border: 0; border-radius: 5px; padding: 5px 12px; font-size: 13px; color: var(--muted); cursor: pointer; }
+  .seg button:hover { color: var(--fg); }
+  .seg button[aria-pressed="true"] { background: var(--card-2); color: var(--fg); }
+
+  .board { display: flex; gap: 14px; align-items: flex-start; overflow-x: auto; padding-bottom: 10px; }
+  .board .box { flex: 1 0 250px; max-width: 380px; margin: 0; padding: 14px; }
+  .board h2 { padding: 2px 4px; }
+
+  .scrollx { overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; min-width: 620px; }
+  th, td { text-align: left; padding: 10px 14px 10px 0; border-bottom: 1px solid var(--hair); vertical-align: middle; }
+  th { color: var(--muted); font-weight: 500; font-size: 13px; white-space: nowrap; }
+  tr:last-child td { border-bottom: 0; }
+  td.r, th.r { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .meter { height: 6px; border-radius: 99px; background: var(--card); min-width: 80px; overflow: hidden; }
+  .meter i { display: block; height: 100%; background: var(--info); border-radius: 99px; }
+
+  dialog { background: var(--overlay); color: var(--fg); border-radius: var(--r-lg); padding: 22px; width: min(480px, calc(100vw - 32px)); }
+  dialog::backdrop { background: rgba(0,0,0,.55); }
+  dialog input, dialog textarea { width: 100%; margin: 12px 0 6px; }
+  dialog.wide { width: min(680px, calc(100vw - 32px)); }
+  textarea.field { display: block; resize: vertical; min-height: 120px; line-height: 1.5; }
+  label.lbl { display: block; font-size: 13px; color: var(--muted); margin-top: 14px; }
+  label.lbl + input, label.lbl + textarea { margin-top: 6px; }
+  .steps { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 14px; }
+  .steps span { font-size: 13px; padding: 4px 12px; border-radius: 4px; background: var(--card); color: var(--faint); }
+  .steps span.on { background: var(--fg); color: var(--ink); font-weight: 600; }
+  .steps span.done { color: var(--ok); }
+  .kv { display: grid; grid-template-columns: minmax(120px, 190px) minmax(0, 1fr); gap: 8px 18px; margin: 14px 0; }
+  .kv dt { color: var(--muted); font-size: 13px; } .kv dd { margin: 0; overflow-wrap: anywhere; }
+  .actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-top: 14px; }
+  .grid + .actions { margin-bottom: 16px; }
+  @media (max-width: 620px) { .kv { grid-template-columns: minmax(0, 1fr); gap: 2px 0; } .kv dd { margin-bottom: 10px; } }
+  dialog .row { justify-content: flex-end; margin-top: 12px; }
+  #toast { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); background: var(--overlay); border-radius: var(--r-md); padding: 10px 16px; z-index: 5; max-width: calc(100vw - 32px); }
+  #settings > .row, #drawer > .row { justify-content: space-between; margin-top: 0; }
+  #bell, #gear { display: inline-flex; align-items: center; gap: 6px; padding: 9px 12px; }
+  #settings h3 { font-size: 13px; font-weight: 600; margin: 22px 0 10px; padding-top: 16px; border-top: 1px solid var(--hair); }
+  #settings h3:first-child { border-top: 0; margin-top: 8px; padding-top: 0; }
+  .count { background: var(--bad); color: var(--ink); font-size: 12px; font-weight: 700; border-radius: 99px; padding: 0 7px; line-height: 1.6; }
+  dialog#drawer { margin: 0 0 0 auto; height: 100vh; height: 100dvh; max-height: none; width: min(460px, 100vw); border-radius: 0; border-width: 0 0 0 1px;
+    padding: 20px; overflow-y: auto; background: var(--overlay); }
+  .pagehead { padding: 16px 18px; } .pagehead .goal { margin-bottom: 0; }
+  .loose { padding: 10px 14px; margin-bottom: 12px; border-radius: var(--r-lg); background: var(--glass); }
+  #drawer h3 { font-size: 13px; font-weight: 500; color: var(--muted); margin: 22px 0 8px; }
+  #drawer .need { align-items: flex-start; } #drawer .need .txt { overflow-wrap: anywhere; }
+  .new-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--info); flex: none; margin-top: 8px; }
+  [hidden] { display: none !important; }
+
+  @media (max-width: 820px) {
+    body { grid-template-columns: 56px minmax(0, 1fr); }
+    .rail a { width: 44px; padding: 10px 0; } .rail a span { display: none; } .logo { width: 40px; height: 40px; }
+    main { padding: 14px 16px 40px; } .cols { grid-template-columns: minmax(0, 1fr); } h1 { font-size: 22px; }
+    #q { max-width: none; flex-basis: 100%; order: 3; }
+  }
+</style>
+</head>
+<body>
+<nav class="rail glass" id="rail" aria-label="Pages"></nav>
+<main id="main">
+  <div class="top">
+    <select class="field glass" id="proj" aria-label="Project" hidden></select>
+    <button class="btn quiet" id="newproj" title="Start a new project">+ Project</button>
+    <input class="field glass" id="q" type="search" placeholder="Search this page" aria-label="Search this page" autocomplete="off">
+    <span class="grow"></span>
+    <span class="pill bad" id="conn" role="status" hidden>Reconnecting…</span>
+    <button class="btn quiet" id="bell" aria-label="Notifications" title="What was found, and what needs you"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 16V11a6 6 0 0 1 12 0v5l1.500 2h-15zM10 20a2 2 0 0 0 4 0"/></svg><span id="bell-n" class="count" hidden></span></button>
+    <button class="btn quiet" id="gear" aria-label="Settings" title="Settings"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M12 3v3M12 18v3M3 12h3M18 12h3M5.600 5.600l2.100 2.100M16.300 16.300l2.100 2.100M5.600 18.400l2.100-2.100M16.300 7.700l2.100-2.100"/></svg></button>
+    <button class="btn quiet" id="pause" hidden>Pause agents</button>
+    <button class="btn" id="new" hidden>+ New task</button>
+  </div>
+  <div id="view" aria-live="off"><p class="empty">Loading…</p></div>
+</main>
+<dialog id="dlg" class="glass" aria-labelledby="dlg-h">
+  <form id="form">
+    <h2 id="dlg-h">New task for the agents</h2>
+    <p class="sub">It goes to the back of the queue. The next free agent picks it up.</p>
+    <input class="field glass" id="task" placeholder="What should they look at next?" aria-label="Task" maxlength="300" required autocomplete="off">
+    <div class="row"><button class="btn ghost" type="button" id="cancel">Cancel</button><button class="btn" id="add">Add to queue</button></div>
+  </form>
+</dialog>
+<dialog id="ask" class="glass wide" aria-labelledby="ask-h">
+  <form id="ask-form">
+    <h2 id="ask-h"></h2>
+    <p class="sub" id="ask-hint"></p>
+    <textarea class="field glass" id="ask-text" rows="6" aria-labelledby="ask-h"></textarea>
+    <div class="row"><button class="btn ghost" type="button" id="ask-cancel">Cancel</button><button class="btn" id="ask-ok">Save</button></div>
+  </form>
+</dialog>
+<dialog id="np" class="glass wide" aria-labelledby="np-h">
+  <form id="np-form">
+    <h2 id="np-h">Start a new project</h2>
+    <p class="sub">You describe the target. A survey agent then studies it, writes up what it is and how it works so you can learn it, and proposes how the project should run. Nothing is attempted until you approve that proposal.</p>
+    <label class="lbl" for="np-name">Project name (letters, digits and dashes)</label>
+    <input class="field glass" id="np-name" required pattern="[A-Za-z0-9][A-Za-z0-9._\-]{0,79}" maxlength="80" autocomplete="off" placeholder="my-target">
+    <label class="lbl" for="np-target">What is the target, and where does it live?</label>
+    <textarea class="field glass" id="np-target" required rows="4" maxlength="4000" placeholder="For example: the file parser.py in /home/me/toy. It reads a small binary format. You can run it with python3."></textarea>
+    <label class="lbl" for="np-goal">What do you hope to do with it? (optional; the agent will propose a goal if you leave this empty)</label>
+    <input class="field glass" id="np-goal" maxlength="500" autocomplete="off" placeholder="Find every distinct way to make it crash">
+    <div class="row"><button class="btn ghost" type="button" id="np-cancel">Cancel</button><button class="btn" id="np-ok">Create project</button></div>
+  </form>
+</dialog>
+<dialog id="settings" class="glass wide" aria-labelledby="settings-h">
+  <div class="row"><h2 id="settings-h">Settings</h2><button class="btn small ghost" id="settings-close">Close</button></div>
+  <div id="settings-body"></div>
+</dialog>
+<dialog id="drawer" class="glass" aria-labelledby="drawer-h">
+  <div class="row"><h2 id="drawer-h">While you were away</h2><button class="btn small ghost" id="drawer-close">Close</button></div>
+  <div id="drawer-body"></div>
+</dialog>
+<div id="toast" class="glass" role="status" hidden></div>
+<noscript><p style="padding:24px">This page needs JavaScript.</p></noscript>
+
+<script>
+"use strict";
+const $ = s => document.querySelector(s);
+const LIVE_MS = 30000;
+const S = { projects: [], events: {}, epoch: {}, utab: "overview", seen: {}, told: null, limit: {}, q: "", open: new Set(), filter: "all", connected: true, loaded: false };
+
+/* ---------- small helpers ---------- */
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const cap = s => String(s || "").charAt(0).toUpperCase() + String(s || "").slice(1);
+const hit = (...parts) => !S.q || parts.filter(Boolean).join(" ").toLowerCase().includes(S.q);
+const live = ts => Date.now() - new Date(ts) < LIVE_MS;
+const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
+const href = (pid, page) => "#/" + encodeURIComponent(pid) + "/" + encodeURIComponent(page);
+function fmt(v) {
+  if (typeof v !== "number" || !isFinite(v)) return "–";
+  if (Number.isInteger(v)) return String(v);
+  return Math.abs(v) < 10 ? v.toFixed(3) : v.toFixed(1);
+}
+function ago(ts) {
+  const s = Math.max(0, (Date.now() - new Date(ts)) / 1000);
+  if (s < 45) return "Just now";
+  if (s < 3600) return Math.max(1, Math.round(s / 60)) + " min ago";
+  if (s < 86400) return Math.round(s / 3600) + " hr ago";
+  return Math.round(s / 86400) + " d ago";
+}
+const clock = ts => new Date(ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+
+const ICONS = {
+  overview: '<rect x="4" y="4" width="7" height="7" rx="1.5"/><rect x="13" y="4" width="7" height="7" rx="1.5"/><rect x="4" y="13" width="7" height="7" rx="1.5"/><rect x="13" y="13" width="7" height="7" rx="1.5"/>',
+  runs: '<path d="M4 5v14h16M8 15l3-4 3 2 5-7"/>',
+  tasks: '<path d="M6 5v14M12 5v8M18 5v11" stroke-width="3.2"/>',
+  agents: '<rect x="4" y="4.5" width="16" height="6.5" rx="1.5"/><rect x="4" y="13" width="16" height="6.5" rx="1.5"/><path d="M8 7.75h.01M8 16.25h.01"/>',
+  tools: '<path d="M14.7 6.3a4 4 0 0 0-5.2 5.2L4 17l3 3 5.5-5.5a4 4 0 0 0 5.2-5.2l-2.5 2.5-2.2-.6-.6-2.2z"/>',
+  connect: '<path d="M9 3v5M15 3v5M7 8h10v3a5 5 0 0 1-10 0zM12 16v5"/>',
+  target: '<circle cx="12" cy="12" r="8.5"/><path d="M12 3.5V12l6 6"/>',
+  cube: '<path d="M12 3l8 4.5v9L12 21l-8-4.5v-9z"/><path d="M4 7.5l8 4.5 8-4.5M12 12v9"/>',
+  bug: '<rect x="8" y="7" width="8" height="12" rx="4"/><path d="M12 7V4M4 13h4M16 13h4M5 7l3 2M19 7l-3 2M5 19l3-2M19 19l-3-2"/>',
+  shield: '<path d="M12 3l7 3v6c0 4.5-3 7.5-7 9-4-1.500-7-4.500-7-9V6z"/>',
+  list: '<path d="M9 6h11M9 12h11M9 18h11M4.500 6h.01M4.500 12h.01M4.500 18h.01"/>',
+  flag: '<path d="M5 21V4h12l-2.500 4 2.500 4H5"/>',
+  dot: '<circle cx="12" cy="12" r="8.5"/><circle cx="12" cy="12" r="2"/>',
+  book: '<path d="M5 5.5A2.500 2.500 0 0 1 7.500 3H19v15H7.500A2.500 2.500 0 0 0 5 20.500zM5 20.500A2.500 2.500 0 0 0 7.500 23H19v-5M9 8h6"/>',
+  table: '<rect x="4" y="5" width="16" height="14" rx="1.5"/><path d="M4 10h16M4 14.5h16M10 5v14"/>',
+  note: '<path d="M6 3h9l4 4v14H6zM14 3v5h5M9 13h6M9 17h6"/>',
+  stats: '<path d="M5 19v-8M12 19V5M19 19v-5" stroke-width="2.6"/>',
+  mark: '<path d="M12 3l8 9-8 9-8-9z"/>',
+};
+const icon = name => `<svg class="i" viewBox="0 0 24 24" aria-hidden="true">${ICONS[name] || ICONS.dot}</svg>`;
+
+/* ---------- routing ---------- */
+function pages(p) {
+  const secs = (Array.isArray(p.config.sections) ? p.config.sections : []).filter(s => s && s.id)
+    .map(s => ({ id: "s." + s.id, title: s.title || s.id, icon: ICONS[s.icon] ? s.icon : { table: "table", chart: "runs", stats: "stats", note: "note", board: "tasks" }[s.view], section: s }));
+  const overview = { id: "overview", title: "Overview", icon: "overview" }, understand = { id: "understand", title: "Understand", icon: "book" };
+  // While a project is being set up, the Understanding page is where everything happens, so it comes first.
+  return [...(p.config.phase === "survey" ? [understand, overview] : [overview, understand]), { id: "runs", title: "Runs", icon: "runs" }, { id: "tasks", title: "Tasks", icon: "tasks" },
+    ...secs, { id: "agents", title: "Agents", icon: "agents" }, { id: "tools", title: "Tools", icon: "tools" }, { id: "connect", title: "Connect", icon: "connect", push: true }];
+}
+function route() {
+  const parts = location.hash.replace(/^#\/?/, "").split("/").map(x => { try { return decodeURIComponent(x); } catch (e) { return x; } });
+  const p = S.projects.find(p => p.id === parts[0]) || S.projects[0] || null;
+  const list = p ? pages(p) : [];
+  return { p, list, page: list.find(x => x.id === parts[1]) || list[0] || null };
+}
+
+/* ---------- turn the event log into what the pages show ---------- */
+function runState(r, m) {
+  const v = r.verdict;
+  if (!v) return m && m.verified ? "pending" : "unverified";
+  if (r.probe) return "probe";  // a probe is only ever measured, so whether its scorer calls it "ok" says nothing about it
+  if (!v.ok) return "failed";
+  if (typeof r.score === "number" && typeof v.score === "number" && Math.abs(r.score - v.score) > (m && typeof m.tolerance === "number" ? m.tolerance : 0.0005)) return "mismatch";
+  return "verified";
+}
+const STATE = { verified: ["Verified", "ok"], mismatch: ["Mismatch", "bad"], failed: ["Not confirmed", "bad"], probe: ["Probe", "info"], pending: ["Pending", ""], unverified: ["Unverified", ""] };
+// For a section the verifier measures: the highest status whose threshold the measured count has reached.
+function measuredStatus(sec, count) {
+  const list = Array.isArray(sec.statuses) && sec.statuses.length ? sec.statuses : [""];
+  let best = null;
+  for (const name of list) { const need = sec.measured[name]; if (typeof need === "number" && count >= need) best = name; }
+  return best === null ? list[0] : best;
+}
+
+let memo = { key: "", value: null };
+function derive(p) {
+  const ev = S.events[p.id] || [], key = p.id + ":" + ev.length + ":" + JSON.stringify(p.config);
+  if (memo.key === key) return memo.value;
+  const m = p.config.metric && typeof p.config.metric === "object" ? p.config.metric : null;
+  const verdicts = new Map(), runs = new Map(), tasks = new Map(), items = new Map(), points = new Map(), agents = new Map(), tools = new Map();
+  const finds = [], acts = [], topics = new Map(), reviews = new Map(), questions = new Map(), proposals = new Map();
+  let idx = -1;
+  for (const e of ev) {
+    idx++;
+    if (e.agent) {
+      const a = agents.get(e.agent) || { name: e.agent, events: 0, runs: 0 };
+      a.events++; a.ts = e.ts; a.harness = e.harness || a.harness; a.host = e.host || a.host; a.model = e.model || a.model;
+      if (e.type === "activity") a.doing = e.text;
+      if (e.type === "run") a.runs++;
+      if (e.type === "verdict") { a.runs++; a.doing = "Re-scoring runs as they arrive"; }
+      agents.set(e.agent, a);
+    }
+    if (e.type === "run") runs.set(e.id, { ...runs.get(e.id), ...e });
+    else if (e.type === "verdict") verdicts.set(e.run, e);
+    else if (e.type === "task") tasks.set(e.id, { ...tasks.get(e.id), ...e });
+    else if (e.type === "item") {
+      const s = items.get(e.section) || new Map(), old = s.get(e.key) || {};
+      s.set(e.key, { ...old, ...e, text: e.text || old.text, data: e.data || old.data ? { ...old.data, ...e.data } : undefined }); items.set(e.section, s);
+      if (typeof e.value === "number") {  // charts plot every report, not just the latest
+        const ps = points.get(e.section) || new Map(); if (!ps.has(e.key)) ps.set(e.key, []);
+        ps.get(e.key).push(e.value); points.set(e.section, ps);
+      }
+    }
+    else if (e.type === "tool") {
+      const t = tools.get(e.text) || { name: e.text, calls: 0, fails: 0, ms: 0, timed: 0, agents: new Set() };
+      t.calls++; if (e.ok === false) t.fails++; if (typeof e.ms === "number") { t.ms += e.ms; t.timed++; } if (e.agent) t.agents.add(e.agent); t.ts = e.ts;
+      tools.set(e.text, t);
+    }
+    else if (e.type === "finding") finds.push(e);
+    else if (e.type === "topic") topics.set(e.key, { ...topics.get(e.key), ...e, body: e.body || e.text || "", idx });
+    else if (e.type === "review") reviews.set(e.key, { ...e, idx });
+    else if (e.type === "proposal") { const old = proposals.get(e.id) || {}; proposals.set(e.id, { ...old, ...e, text: e.text || old.text, agent: old.agent || e.agent, idx }); }
+    else if (e.type === "question") {
+      // A question and its answer are separate reports with the same id. "asker" is whoever opened it.
+      const k = e.id || "_" + idx, old = questions.get(k) || {};
+      questions.set(k, { ...old, ...e, id: k, text: e.text || old.text, asker: old.asker || (e.source === "you" ? "you" : "agent"),
+        askedBy: old.askedBy !== undefined ? old.askedBy : (e.agent || ""), askedTs: old.askedTs || e.ts, answeredBy: e.answer ? (e.source === "you" ? "You" : e.agent || "An agent") : old.answeredBy });
+    }
+    else if (e.type === "activity") acts.push(e);
+  }
+  const runList = [...runs.values()], unique = m && m.aggregate === "unique", higher = m && (m.direction === "higher" || m.aggregate === "max");
+  let best = null; const seen = new Set(), reach = new Map();
+  for (const r of runList) {
+    r.verdict = verdicts.get(r.id); r.state = runState(r, m);
+    // Only a number the verifier measured counts. With no verifier configured, fall back to the claim.
+    r.value = r.verdict ? (r.verdict.ok ? (typeof r.verdict.score === "number" ? r.verdict.score : r.score) : null) : (m && m.verified ? null : r.score);
+    if (r.verdict && r.verdict.covers) for (const [k, n] of Object.entries(r.verdict.covers)) reach.set(k, (reach.get(k) || 0) + n);
+    if (r.probe || typeof r.value !== "number") { r.value = null; continue; }  // probes are measured but never count as results
+    if (unique) { const sig = (r.verdict && r.verdict.text) || r.text; r.first = !seen.has(sig); seen.add(sig); r.line = seen.size; }
+    else { r.first = best === null || (higher ? r.value > best : r.value < best); if (r.first) best = r.value; r.line = best; }
+  }
+  const scored = runList.filter(r => r.value !== null);
+  // On a measured section, the verifier's counts decide each entry's status; whatever status an agent sent is ignored.
+  for (const sec of Array.isArray(p.config.sections) ? p.config.sections : []) {
+    if (!sec || !sec.measured || typeof sec.measured !== "object") continue;
+    const s = items.get(sec.id) || new Map();
+    for (const k of new Set([...s.keys(), ...reach.keys()])) {
+      const old = s.get(k) || { key: k, section: sec.id, ts: (runList[runList.length - 1] || {}).ts };
+      s.set(k, { ...old, count: reach.get(k) || 0, status: measuredStatus(sec, reach.get(k) || 0) });
+    }
+    items.set(sec.id, s);
+  }
+  const taskList = [...tasks.values()];
+  for (const a of agents.values()) a.task = taskList.find(t => t.status === "running" && t.agent === a.name);
+  // How far the person has vouched for each topic on the Understanding page.
+  for (const t of topics.values()) {
+    const r = reviews.get(t.key), fresh = r && r.idx > t.idx;
+    t.state = t.source === "you" ? ["Written by you", "solid"] : fresh && r.status === "confirmed" ? ["Confirmed by you", "ok"]
+      : fresh ? ["You flagged this", "bad"] : r && r.status === "confirmed" ? ["Changed since you confirmed", "info"] : ["Agent's reading, unchecked", ""];
+    t.flag = fresh && r.status !== "confirmed" ? r : null;
+  }
+  const allQ = [...questions.values()], qs = allQ.filter(x => x.asker === "agent" && !x.answer);
+  const props = [...proposals.values()], proposal = props.filter(x => x.status === "proposed").pop() || null;
+  const value = { m, unique, runs: runList, scored, headline: unique ? seen.size : best, tasks: taskList, items, points, finds, qs, acts,
+    topics: [...topics.values()], questions: allQ, proposal, lastProposal: props[props.length - 1] || null,
+    agents: [...agents.values()], tools: [...tools.values()].sort((a, b) => b.calls - a.calls) };
+  memo = { key, value };
+  return value;
+}
+
+/* ---------- Markdown, for notes and findings that agents write ----------
+   Everything is escaped first and only a fixed set of tags is ever produced, so agent text cannot inject markup.
+   Links are kept only when they are plain http(s). */
+function mdInline(s) {
+  return s.split(/(`[^`\n]+`)/).map(part => {
+    if (part.length > 2 && part[0] === "`" && part[part.length - 1] === "`") return `<code>${esc(part.slice(1, -1))}</code>`;
+    return esc(part)
+      .replace(/\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>')
+      .replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>")
+      .replace(/(^|[\s(])\*([^*\s][^*\n]*)\*(?=[\s).,;:!?]|$)/g, "$1<em>$2</em>");
+  }).join("");
+}
+function md(src) {
+  const lines = String(src || "").replace(/\r/g, "").split("\n"), out = [];
+  const cells = l => l.trim().replace(/^\||\|$/g, "").split("|").map(c => c.trim());
+  const bullet = /^(\s*)([-*]|\d+[.)])\s+(.*)$/;
+  let i = 0, para = [];
+  const flush = () => { if (para.length) { out.push(`<p>${para.map(mdInline).join("<br>")}</p>`); para = []; } };
+  while (i < lines.length) {
+    const l = lines[i];
+    if (/^\s*```/.test(l)) {
+      flush(); const code = []; i++;
+      while (i < lines.length && !/^\s*```/.test(lines[i])) code.push(lines[i++]);
+      i++; out.push(`<pre>${esc(code.join("\n"))}</pre>`);
+    } else if (/^\s*\|.*\|\s*$/.test(l) && /^\s*\|?[\s:|-]*-{2,}[\s:|-]*$/.test(lines[i + 1] || "")) {
+      flush(); const head = cells(l), rows = []; i += 2;
+      while (i < lines.length && /^\s*\|.*\|\s*$/.test(lines[i])) rows.push(cells(lines[i++]));
+      out.push(`<div class="scrollx"><table><tr>${head.map(c => `<th>${mdInline(c)}</th>`).join("")}</tr>${rows.map(r => `<tr>${head.map((_, k) => `<td>${mdInline(r[k] || "")}</td>`).join("")}</tr>`).join("")}</table></div>`);
+    } else if (/^#{1,6}\s+/.test(l)) {
+      flush(); out.push(`<h3>${mdInline(l.replace(/^#{1,6}\s+/, ""))}</h3>`); i++;
+    } else if (bullet.test(l)) {
+      flush(); const ordered = /^\s*\d/.test(l), items = [];
+      while (i < lines.length && (bullet.test(lines[i]) || (/^\s+\S/.test(lines[i]) && items.length))) {
+        const m = lines[i].match(bullet);
+        if (m) items.push({ depth: Math.min(3, Math.floor(m[1].length / 2)), text: m[3] }); else items[items.length - 1].text += " " + lines[i].trim();
+        i++;
+      }
+      out.push(`<${ordered ? "ol" : "ul"}>${items.map(it => `<li style="margin-left:${it.depth * 1.2}em">${mdInline(it.text)}</li>`).join("")}</${ordered ? "ol" : "ul"}>`);
+    } else if (!l.trim()) { flush(); i++; }
+    else { para.push(l); i++; }
+  }
+  flush();
+  return out.join("");
+}
+
+/* ---------- shared bits of markup ---------- */
+const who = e => e.agent ? `<span class="pill" title="${esc(e.agent)}">${esc(e.agent)}</span>` : "";
+const empty = text => `<div class="empty">${esc(text)}</div>`;
+const bare = text => `<div class="box glass">${empty(text)}</div>`;  // an empty state shown on its own, outside any panel
+function more(key, label, content) {
+  if (!content) return "";
+  const open = S.open.has(key);
+  return `<div class="mt"><button class="link" data-open="${esc(key)}" data-fk="open:${esc(key)}" aria-expanded="${open}">${open ? "Hide " : "Show "}${label}</button>${open ? (label === "note" ? `<div class="md inset">${md(content)}</div>` : `<pre>${esc(content)}</pre>`) : ""}</div>`;
+}
+function statusPill(status, sec) {
+  if (!status) return "";
+  const list = sec && Array.isArray(sec.statuses) ? sec.statuses : [], i = list.indexOf(status);
+  const cls = i < 0 || list.length < 2 ? "" : i === list.length - 1 ? "solid" : i === 0 ? "" : "info";
+  return `<span class="pill ${cls}">${esc(cap(status))}</span>`;
+}
+
+function chart(d) {
+  const pts = d.scored, n = pts.length;
+  if (!n) return "";
+  const W = 760, H = 200, L = 52, R = 14, T = 14, B = 26;
+  const ys = d.unique ? pts.map(r => r.line) : pts.map(r => r.value).concat(pts.map(r => r.line));
+  let lo = d.unique ? 0 : Math.min(...ys), hi = Math.max(...ys);
+  if (hi === lo) { hi += 1; if (!d.unique) lo -= 1; }
+  const pad = d.unique ? 0 : (hi - lo) * 0.1;
+  const x = i => L + (W - L - R) * (n === 1 ? 0.5 : i / (n - 1));
+  const y = v => T + (H - T - B) * (1 - (v - (lo - pad)) / (hi - lo + 2 * pad));
+  const path = pts.map((r, i) => (i ? `H${x(i).toFixed(1)}V` : `M${x(i).toFixed(1)} `) + y(r.line).toFixed(1)).join("");
+  const marks = d.unique ? [...new Set([0, Math.round(hi / 2), hi])] : [lo, (lo + hi) / 2, hi];  // whole numbers only when counting
+  const ticks = marks.map(v => `<line x1="${L}" x2="${W - R}" y1="${y(v)}" y2="${y(v)}" stroke="var(--hair)"/>
+    <text x="${L - 8}" y="${y(v) + 4}" text-anchor="end" font-size="11" fill="var(--muted)">${d.unique ? Math.round(v) : fmt(v)}</text>`).join("");
+  const dots = n === 1 ? `<circle cx="${x(0)}" cy="${y(pts[0].line)}" r="4" fill="var(--fg)"/>` : d.unique || n > 150 ? "" : pts.map((r, i) => `<circle cx="${x(i).toFixed(1)}" cy="${y(r.value).toFixed(1)}" r="${r.first ? 4 : 3}" fill="${r.first ? "var(--fg)" : "var(--faint)"}"><title>${esc(r.text)}: ${fmt(r.value)}</title></circle>`).join("");
+  return `<svg class="chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="${d.unique ? "Running count across runs" : "Score per run with best-so-far line"}">${ticks}
+    <path d="${path}" fill="none" stroke="var(--fg)" stroke-width="2" stroke-linejoin="round"/>${dots}
+    <text x="${L}" y="${H - 5}" font-size="11" fill="var(--muted)">Run 1</text><text x="${W - R}" y="${H - 5}" font-size="11" fill="var(--muted)" text-anchor="end">Run ${n}</text></svg>`;
+}
+
+// A plain multi-line chart for agent-made pages. Each line also gets a different dash, so colour is not the only cue.
+const LINES = [["var(--fg)", ""], ["var(--info)", "7 4"], ["var(--ok)", "2 4"], ["var(--bad)", "10 3 2 3"], ["var(--muted)", "1 5"]];
+function seriesChart(series, label) {
+  const W = 760, H = 240, L = 56, R = 14, T = 14, B = 26, all = series.flatMap(s => s.values), n = Math.max(...series.map(s => s.values.length));
+  let lo = Math.min(...all), hi = Math.max(...all);
+  if (lo > 0 && lo < hi * 0.5) lo = 0;
+  if (hi === lo) { hi += 1; lo -= lo === 0 ? 0 : 1; }
+  const x = i => L + (W - L - R) * (n === 1 ? 0.5 : i / (n - 1)), y = v => T + (H - T - B) * (1 - (v - lo) / (hi - lo));
+  const ticks = [lo, (lo + hi) / 2, hi].map(v => `<line x1="${L}" x2="${W - R}" y1="${y(v)}" y2="${y(v)}" stroke="var(--hair)"/>
+    <text x="${L - 8}" y="${y(v) + 4}" text-anchor="end" font-size="11" fill="var(--muted)">${fmt(Math.abs(v) >= 100 ? Math.round(v) : v)}</text>`).join("");
+  const lines = series.map((s, k) => s.values.length === 1
+    ? `<circle cx="${x(0)}" cy="${y(s.values[0])}" r="4" fill="${LINES[k][0]}"/>`
+    : `<path d="${s.values.map((v, i) => (i ? "L" : "M") + x(i).toFixed(1) + " " + y(v).toFixed(1)).join("")}" fill="none" stroke="${LINES[k][0]}" stroke-width="2" stroke-dasharray="${LINES[k][1]}" stroke-linejoin="round"/>`).join("");
+  return `<svg class="chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="${esc(label)}: ${series.map(s => esc(s.name) + " now " + fmt(s.values[s.values.length - 1])).join(", ")}">${ticks}${lines}
+    <text x="${L}" y="${H - 5}" font-size="11" fill="var(--muted)">First report</text><text x="${W - R}" y="${H - 5}" font-size="11" fill="var(--muted)" text-anchor="end">Latest (${n})</text></svg>
+    <div class="tags mt2">${series.map((s, k) => `<span class="legend"><svg width="26" height="8" aria-hidden="true"><path d="M1 4h24" stroke="${LINES[k][0]}" stroke-width="2" stroke-dasharray="${LINES[k][1]}"/></svg>${esc(s.name)} <b class="num">${fmt(s.values[s.values.length - 1])}</b></span>`).join("")}</div>`;
+}
+
+// Draws a diagram an agent described as boxes and arrows. Boxes are placed in rows, each below whatever points to it;
+// an arrow that loops back to an earlier box is drawn dashed around the side. The agent never controls the drawing itself.
+let diagrams = 0;
+function drawDiagram(dg, title) {
+  const nodes = (Array.isArray(dg.nodes) ? dg.nodes : []).slice(0, 40), n = nodes.length;
+  if (!n) return "";
+  const at = new Map(nodes.map((x, i) => [x.id, i])), outs = nodes.map(() => []);
+  const edges = (Array.isArray(dg.edges) ? dg.edges : []).filter(e => at.has(e.from) && at.has(e.to)).map(e => ({ u: at.get(e.from), v: at.get(e.to), label: e.label || "" }));
+  for (const e of edges) if (e.u !== e.v) outs[e.u].push(e);
+  const mark = nodes.map(() => 0), fed = new Set(edges.filter(e => e.u !== e.v).map(e => e.v));
+  const visit = u => { mark[u] = 1; for (const e of outs[u]) { if (mark[e.v] === 1) e.back = true; else if (!mark[e.v]) visit(e.v); } mark[u] = 2; };
+  nodes.forEach((_, i) => { if (!fed.has(i) && !mark[i]) visit(i); });
+  nodes.forEach((_, i) => { if (!mark[i]) visit(i); });
+  const layer = nodes.map(() => 0), parents = nodes.map(() => []), ghost = nodes.map(() => false);
+  for (let pass = 0; pass < n; pass++) {
+    let moved = false;
+    for (const e of edges) if (e.u !== e.v && !e.back && layer[e.v] < layer[e.u] + 1) { layer[e.v] = layer[e.u] + 1; moved = true; }
+    if (!moved) break;
+  }
+  // An arrow that skips a row gets an invisible waypoint in each row it passes, so it is routed around the boxes there.
+  for (const e of edges) {
+    if (e.u === e.v || e.back) continue;
+    let prev = e.u; e.via = [];
+    for (let l = layer[e.u] + 1; l < layer[e.v]; l++) { const i = layer.length; layer.push(l); parents.push([prev]); ghost.push(true); e.via.push(i); prev = i; }
+    parents[e.v].push(prev);
+  }
+  const rows = [], slot = layer.map(() => 0.5), W = 820, NH = 46, GAP = 58, SIDE = 64, TOP = 14, GHOST = 22, cx = [], cy = [], bw = [];
+  layer.forEach((l, i) => (rows[l] = rows[l] || []).push(i));
+  rows.forEach((row, r) => {
+    const mean = i => parents[i].length ? parents[i].reduce((a, u) => a + slot[u], 0) / parents[i].length : 0.5;
+    if (r) row.sort((a, b) => mean(a) - mean(b));
+    const ghosts = row.filter(i => ghost[i]).length, real = row.length - ghosts;
+    const w = Math.min(190, (W - 2 * SIDE - (row.length - 1) * 16 - ghosts * GHOST) / Math.max(1, real));
+    let x = W / 2 - (real * w + ghosts * GHOST + (row.length - 1) * 16) / 2;
+    row.forEach((i, k) => { slot[i] = (k + 0.5) / row.length; bw[i] = ghost[i] ? GHOST : w; cx[i] = x + bw[i] / 2; cy[i] = TOP + r * (NH + GAP); x += bw[i] + 16; });
+  });
+  const H = TOP * 2 + rows.length * (NH + GAP) - GAP, id = "dg" + (++diagrams), f = v => v.toFixed(1);
+  const cut = (text, w) => { const max = Math.max(4, Math.floor((w - 18) / 7.3)); return text.length > max ? text.slice(0, max - 1) + "…" : text; };
+  const lines = edges.map(e => {
+    let d, lx, ly;
+    if (e.u === e.v) {
+      const x = cx[e.u] + bw[e.u] / 2, y = cy[e.u] + NH / 2;
+      d = `M${f(x)} ${f(y - 9)}C${f(x + 40)} ${f(y - 26)} ${f(x + 40)} ${f(y + 26)} ${f(x)} ${f(y + 9)}`; lx = x + 34; ly = y + 4;
+    } else if (e.back) {
+      const x1 = cx[e.u] + bw[e.u] / 2, y1 = cy[e.u] + NH / 2, x2 = cx[e.v] + bw[e.v] / 2, y2 = cy[e.v] + NH / 2, out = Math.min(W - 8, Math.max(x1, x2) + 46);
+      d = `M${f(x1)} ${f(y1)}C${f(out)} ${f(y1)} ${f(out)} ${f(y2)} ${f(x2 + 2)} ${f(y2)}`; lx = Math.min(W - 30, out - 8); ly = (y1 + y2) / 2 + 4;
+    } else {
+      const pts = [[cx[e.u], cy[e.u] + NH], ...e.via.map(i => [cx[i], cy[i] + NH / 2]), [cx[e.v], cy[e.v] - 2]];
+      d = `M${f(pts[0][0])} ${f(pts[0][1])}` + pts.slice(1).map((q, k) => { const o = pts[k], bend = (q[1] - o[1]) / 2; return `C${f(o[0])} ${f(o[1] + bend)} ${f(q[0])} ${f(q[1] - bend)} ${f(q[0])} ${f(q[1])}`; }).join("");
+      lx = (pts[0][0] + pts[1][0]) / 2; ly = (pts[0][1] + pts[1][1]) / 2 + 4;
+    }
+    return `<path d="${d}" fill="none" stroke="var(--faint)" stroke-width="1.5" ${e.back || e.u === e.v ? 'stroke-dasharray="5 4"' : ""} marker-end="url(#${id})"/>`
+      + (e.label ? `<text x="${f(lx)}" y="${f(ly)}" text-anchor="middle" font-size="11" fill="var(--muted)" stroke="var(--glass)" stroke-width="4" paint-order="stroke">${esc(cut(e.label, 150))}</text>` : "");
+  }).join("");
+  const boxes = nodes.map((x, i) => `<g><title>${esc(x.label)}${x.note ? ": " + esc(x.note) : ""}</title>
+    <rect x="${f(cx[i] - bw[i] / 2)}" y="${f(cy[i])}" width="${f(bw[i])}" height="${NH}" rx="11" fill="var(--solid)" stroke="var(--hair-2)"/>
+    <text x="${f(cx[i])}" y="${f(cy[i] + NH / 2 + 4.5)}" text-anchor="middle" font-size="13" fill="var(--fg)">${esc(cut(x.label, bw[i]))}</text></g>`).join("");
+  const notes = nodes.filter(x => x.note);
+  return `<svg class="chart" style="max-width:900px;margin:0 auto" viewBox="0 0 ${W} ${f(H)}" role="img" aria-label="Diagram: ${esc(title)}, ${n} parts, ${edges.length} connections">
+    <defs><marker id="${id}" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="var(--faint)"/></marker></defs>${lines}${boxes}</svg>
+    ${edges.some(e => e.back || e.u === e.v) ? `<div class="sub mt" style="text-align:center">A dashed arrow loops back to an earlier step.</div>` : ""}
+    ${notes.length ? `<dl class="kv" style="margin-bottom:0">${notes.map(x => `<dt>${esc(x.label)}</dt><dd>${esc(x.note)}</dd>`).join("")}</dl>` : ""}`;
+}
+
+function itemCard(p, d, sec, it) {
+  const runs = d.runs.filter(r => r.area === it.key).length;
+  return `<div class="box glass"><div class="row"><h2>${esc(it.key)}</h2>${statusPill(it.status, sec)}</div>
+    ${it.text ? `<div class="sub">${esc(it.text)}</div>` : ""}${more("item:" + sec.id + ":" + it.key, "note", it.body)}
+    ${sec.measured ? `<div class="sub mt2">Verifier measured <b class="num" style="color:var(--fg);font-weight:500">${fmt(it.count || 0)}</b> ${esc(sec.unit || "hits")}</div>`
+      : `<div class="tags mt2">${who(it)}<span class="sub">${runs ? plural(runs, "run") + ", " : ""}updated ${ago(it.ts).toLowerCase()}</span></div>`}</div>`;
+}
+function boardCard(p, sec, it, isTask) {
+  const acts = isTask && it.status === "review"
+    ? `<div class="tags mt2"><button class="btn small" data-task="${esc(it.id)}" data-status="done" data-fk="done:${esc(it.id)}">Mark done</button><button class="btn small ghost" data-task="${esc(it.id)}" data-status="queued" data-fk="requeue:${esc(it.id)}">Send back</button></div>` : "";
+  const tags = (it.source === "you" ? `<span class="pill solid">You</span>` : "") + who(it) + (isTask && !it.agent && it.source !== "you" ? `<span class="pill">Unassigned</span>` : "");
+  return `<div class="card"><div class="row"><span class="tags">${tags}</span><span class="sub nowrap">${ago(it.ts)}</span></div>
+    <div class="mt">${esc(isTask ? it.text : it.key)}</div>${isTask ? (it.area ? `<div class="sub">${esc(it.area)}</div>` : "") : (it.text ? `<div class="sub">${esc(it.text)}</div>` : "")}
+    ${isTask ? "" : more("item:" + sec.id + ":" + it.key, "note", it.body)}${acts}</div>`;
+}
+// Every list that can grow without limit goes through here: it shows the newest few and a button for more, so no page
+// keeps getting longer as a project runs. The count shown per list is remembered until you leave the page.
+function paged(key, list, step, render, wrap = x => x) {
+  const n = S.limit[key] || step, rest = list.length - n;
+  return wrap(list.slice(0, n).map(render).join(""))
+    + (rest > 0 ? `<div class="actions"><button class="btn small ghost" data-more="${esc(key)}" data-step="${step}" data-fk="more:${esc(key)}">Show ${Math.min(step * 2, rest)} more</button><span class="sub">${n} of ${list.length} shown</span></div>` : "");
+}
+
+function board(p, key, cols, list, sec, isTask) {
+  return `<div class="board" data-keep="board:${esc(key)}">` + cols.map(([status, label]) => {
+    const all = list.filter(x => (x.status || "") === status), shown = all.filter(x => hit(x.text, x.key, x.area, x.agent)).reverse();
+    return `<div class="box glass"><h2>${esc(label)} <span class="pill">${all.length}</span></h2>${shown.length ? paged("board:" + key + ":" + status, shown, 5, x => boardCard(p, sec, x, isTask)) : empty(S.q && all.length ? "No matches" : "Nothing here")}</div>`;
+  }).join("") + `</div>`;
+}
+
+/* ---------- pages ---------- */
+const views = {
+  overview(p, d) {
+    const m = d.m, up = d.agents.filter(a => live(a.ts)), review = d.tasks.filter(t => t.status === "review");
+    const tile = (n, label, page) => `<a class="tile glass" href="${href(p.id, page)}"><b>${n}</b><span class="sub">${esc(label)}</span></a>`;
+    const need = [];
+    for (const r of d.runs.filter(r => r.state === "mismatch").slice(-3).reverse())
+      need.push(["Mismatch", "bad", `${r.agent || "An agent"} claimed ${fmt(r.score)} but the verifier measured ${fmt(r.verdict.score)}: ${r.text}`, "runs"]);
+    const failed = d.runs.filter(r => r.state === "failed").length;
+    if (failed) need.push(["Not confirmed", "bad", `${plural(failed, "run")} did not hold up when the verifier re-scored ${failed === 1 ? "it" : "them"}`, "runs"]);
+    for (const t of review.slice(-4).reverse()) need.push(["Review", "info", t.text, "tasks"]);
+    if (d.proposal) need.unshift(["Setup", "info", "A setup proposal is waiting for you to read and approve: " + d.proposal.text, "understand"]);
+    for (const x of d.qs.slice(-3).reverse()) need.push(["Question", "", x.text, "understand"]);
+    const stale = d.topics.filter(t => t.state[0] === "Changed since you confirmed").length;
+    if (stale) need.push(["Changed", "info", `${plural(stale, "topic")} on the Understanding page changed after you confirmed ${stale === 1 ? "it" : "them"}`, "understand"]);
+    const finds = d.finds.filter(f => hit(f.text, f.agent)).reverse().slice(0, 30), acts = d.acts.filter(a => hit(a.text, a.agent)).slice(-40).reverse();
+    const results = d.runs.filter(r => !r.probe), ok = results.filter(r => r.verdict && r.verdict.ok).length;
+    const label = m ? (d.unique ? cap(m.name || "unique results") : `Best ${m.verified ? "verified " : ""}${m.name || "score"}`) : "";
+    return `${need.length ? `<div class="box glass"><h2>Needs you <span class="pill">${need.length}</span></h2>${need.map(([k, cls, text, page]) =>
+        `<a class="need" href="${href(p.id, page)}"><span class="pill ${cls}">${k}</span><span class="txt">${esc(text)}</span></a>`).join("")}</div>` : ""}
+      <div class="box glass">${up.length ? up.map(a => `<div class="live"><span class="dot"></span><span class="pill">${esc(a.name)}</span><span class="what">${esc(a.doing || "Reporting")}</span></div>`).join("")
+        : `<div class="live"><span class="dot idle"></span><span>No agent has reported in the last ${LIVE_MS / 1000} seconds</span></div>`}</div>
+      <div class="tiles">${m && d.headline !== null ? tile(fmt(d.headline), label, "runs") : ""}
+        ${results.length ? tile(m && m.verified ? `${ok} of ${results.length}` : results.length, m && m.verified ? "Runs confirmed" : "Runs", "runs") : ""}
+        ${tile(`${up.length} of ${d.agents.length}`, "Agents live", "agents")}
+        ${(p.config.sections || []).filter(s => s && s.progress && Array.isArray(s.statuses) && s.statuses.length).map(s => {
+          const its = [...(d.items.get(s.id) || new Map()).values()], done = its.filter(i => i.status === s.statuses[s.statuses.length - 1]).length;
+          return its.length ? tile(`${done} of ${its.length}`, `${s.title || s.id} ${s.statuses[s.statuses.length - 1]}`, "s." + s.id) : ""; }).join("")}
+        ${tile(review.length, "Waiting for review", "tasks")}</div>
+      ${d.scored.length ? `<div class="box glass"><h2>${esc(d.unique ? cap(m.name || "Unique results") + " over time" : (m.name || "Score") + " per run, with best so far")}</h2>${chart(d)}
+        <div class="sub mt">${m.verified ? "Only runs the verifier confirmed are plotted." : "No verifier is set up for this project, so these are the agents' own numbers."}${d.unique ? "" : " White dots set a new best."}</div></div>` : ""}
+      <div class="cols"><div>
+        <div class="box glass"><h2>Findings <span class="pill">${d.finds.length}</span></h2><div class="scroll" data-keep="finds">${finds.map((f, i) =>
+          `<div class="card"><div class="row"><span class="tags">${who(f)}</span><span class="sub nowrap">${ago(f.ts)}</span></div><div class="mt">${esc(f.text)}</div>${more("find:" + f.ts + ":" + f.text.slice(0, 40), "note", f.body)}</div>`).join("") || empty(d.finds.length ? "No matches" : "None yet")}</div></div>
+        <div class="box glass"><h2>Open questions <span class="pill">${d.qs.length}</span></h2>${d.qs.filter(x => hit(x.text)).map(x => `<div class="card">${esc(x.text)}</div>`).join("") || empty("None")}</div>
+      </div><div><div class="box glass"><h2>Activity</h2><div class="scroll" data-keep="acts">${acts.map(a =>
+          `<div class="card"><div class="row"><span class="tags">${who(a)}</span><span class="sub nowrap num">${esc(clock(a.ts))}</span></div><div class="mt">${esc(a.text)}</div></div>`).join("") || empty(d.acts.length ? "No matches" : "Nothing yet")}</div></div></div></div>`;
+  },
+
+  understand(p, d) {
+    const survey = p.config.phase === "survey", small = (act, label, attrs = "", cls = "ghost") =>
+      `<button class="btn small ${cls}" data-act="${act}" ${attrs} data-fk="${act}:${esc(attrs)}">${label}</button>`;
+    let h = "";
+
+    if (survey) {
+      const started = d.agents.length > 0, prop = d.proposal, step = prop ? 2 : 1;
+      h += `<div class="box glass"><div class="steps">${["Survey", "Your review", "Run"].map((s, i) => `<span class="${i + 1 === step ? "on" : i + 1 < step ? "done" : ""}">${i + 1}. ${s}</span>`).join("")}</div>
+        <dl class="kv"><dt>The target</dt><dd>${esc(p.config.target || "Not described")}</dd>${p.config.goal ? `<dt>What you hope to do</dt><dd>${esc(p.config.goal)}</dd>` : ""}</dl>`;
+      if (prop) {
+        const c = prop.config || {}, mt = c.metric || {}, secs = Array.isArray(c.sections) ? c.sections : [], entries = Array.isArray(c.entries) ? c.entries : [];
+        const how = { unique: "the number of distinct confirmed results", max: "the highest confirmed score", min: "the lowest confirmed score" }[mt.aggregate] || "not stated";
+        const row = (k, v) => v ? `<dt>${k}</dt><dd>${v}</dd>` : "";
+        h += `<h2>Proposed setup: ${esc(prop.text)}</h2><div class="tags">${who(prop)}<span class="sub">${ago(prop.ts)}</span></div>
+          ${prop.body ? `<div class="md mt2">${md(prop.body)}</div>` : ""}
+          <dl class="kv">${row("Goal", esc(c.goal))}${row("How the work will go", esc(c.summary))}${row("Rules for agents", esc(c.rules))}
+            ${row("Progress is counted as", mt.name ? `${esc(mt.name)}: ${how}` : "")}${row("Each result must include", esc(mt.artifact))}
+            ${row("Pages", secs.map(s => `${esc(s.title || s.id)} <span class="sub">(${esc(s.view || "grid")}${s.measured ? ", measured by the verifier" : ""})</span>`).join("<br>"))}
+            ${row(`The map (${entries.length} to cover)`, entries.slice(0, 40).map(x => `<b style="font-weight:500">${esc(x.key)}</b>${x.text ? ` <span class="sub">${esc(x.text)}</span>` : ""}`).join("<br>") + (entries.length > 40 ? `<br><span class="sub">and ${entries.length - 40} more</span>` : ""))}</dl>
+          ${prop.scorer && prop.scorer.source ? `<h2>Scoring script</h2><div class="sub">This decides which results count. Approving saves it on this machine, where the verifier will run it on every result. Read it before you approve.</div>${more("scorer:" + prop.id, "scoring script", prop.scorer.source)}`
+            : `<div class="sub">No scoring script was proposed, so results would be shown as unverified claims.</div>`}
+          <div class="actions">${small("approve", "Approve and start", `data-id="${esc(prop.id)}"`, "")}${small("sendback", "Send back with comments", `data-id="${esc(prop.id)}"`)}</div>`;
+      } else if (!started) {
+        h += `<h2>Next: start a survey agent</h2><div class="sub">It will study the target, write this page so you can learn the target too, and propose how the project should run. Run this where the target lives, with your own harness command after the <code>--</code>.</div>
+          <div class="row mt2"><span></span><button class="btn small ghost" data-copy="survey" data-fk="copy:survey">Copy</button></div>
+          <pre id="copy-survey">${esc(`export PROJECT_VIEW_URL=${location.origin}\npython3 loop.py ${p.id} --agent survey-1 -- claude -p`)}</pre>`;
+      } else {
+        h += `<h2>The survey agent is working</h2><div class="sub">${d.lastProposal && d.lastProposal.status === "returned" ? "You sent its last proposal back. A revised one will appear here." : "Topics appear below as it writes them. Its proposal for how to run the project will appear here when it is ready."}
+          You can already read, flag and ask questions.</div>`;
+      }
+      h += `</div>`;
+    }
+
+    const setup = h;
+    h = "";
+    const topics = d.topics.filter(t => hit(t.key, t.body));
+    h += `<div class="row loose glass" style="flex-wrap:wrap"><h2 style="white-space:nowrap;margin:0">What we understand <span class="pill">${d.topics.length}</span></h2><span class="actions" style="margin:0">${small("addnote", "Add your own note")}${small("ask", "Ask a question", "", "")}</span></div>`;
+    h += topics.map(t => {
+      const k = `data-key="${esc(t.key)}"`;
+      return `<div class="box glass"><div class="row" style="margin-bottom:10px"><h2>${esc(t.key)}</h2><span class="pill ${t.state[1]}">${t.state[0]}</span></div>
+        ${t.flag ? `<div class="sub" style="margin-bottom:10px">You said: ${esc(t.flag.text || (t.flag.status === "simpler" ? "explain this more simply" : "I don't follow this"))}. An agent has been asked to rewrite it.</div>` : ""}
+        ${t.diagram ? drawDiagram(t.diagram, t.key) : ""}<div class="md${t.diagram ? " mt2" : ""}">${md(t.body)}</div>
+        <div class="actions">${t.state[0] === "Confirmed by you" || t.source === "you" ? "" : small("confirm", "This is right", k)}${t.source === "you" ? "" : small("unclear", "I don't follow", k) + small("simpler", "Explain it more simply", k)}
+          ${small("ask", "Ask about this", k)}${small("edit", "Edit", k)}<span class="grow"></span><span class="tags">${t.source === "you" ? "" : who(t)}<span class="sub nowrap">${ago(t.ts)}</span></span></div></div>`;
+    }).join("") || `<div class="box glass">${d.topics.length ? empty("No matches") : `<div class="sub">Nothing has been written here yet. This page is where agents explain the target in plain terms, so you can learn it and correct them.</div>
+        ${survey ? "" : `<div class="actions">${small("seed", "Ask the agents to write this page", "", "")}</div>`}`}</div>`;
+
+    const topicsHtml = h;
+    h = "";
+    const forYou = d.questions.filter(x => x.asker === "agent" && !x.answer), yours = d.questions.filter(x => x.asker === "you").reverse(), done = d.questions.filter(x => x.asker === "agent" && x.answer).reverse();
+    h += `<div class="cols"><div><div class="box glass"><h2>Questions for you <span class="pill">${forYou.length}</span></h2>${forYou.map(x =>
+        `<div class="card"><div class="row"><span class="tags">${x.askedBy ? `<span class="pill">${esc(x.askedBy)}</span>` : ""}</span><span class="sub nowrap">${ago(x.askedTs)}</span></div><div class="mt">${esc(x.text)}</div>
+          ${String(x.id)[0] === "_" ? "" : `<div class="actions" style="margin-top:8px">${small("answer", "Answer", `data-id="${esc(x.id)}"`, "")}</div>`}</div>`).join("") || empty("Nothing is waiting on you")}
+        ${done.length ? `<div class="sub mt2">Answered</div>${done.slice(0, 6).map(x => `<div class="card"><div class="sub">${esc(x.text)}</div><div class="md mt">${md(x.answer)}</div></div>`).join("")}` : ""}</div></div>
+      <div><div class="box glass"><h2>Your questions <span class="pill">${yours.length}</span></h2>${yours.slice(0, 20).map(x =>
+        `<div class="card"><div class="row"><span class="tags">${x.key ? `<span class="pill">${esc(x.key)}</span>` : ""}</span><span class="sub nowrap">${ago(x.askedTs)}</span></div><div class="mt">${esc(x.text)}</div>
+          ${x.answer ? `<div class="md inset">${md(x.answer)}</div><div class="sub mt">Answered by ${esc(x.answeredBy || "an agent")}</div>` : `<div class="sub mt">Waiting for an agent. It will be answered at the start of the next round.</div>`}</div>`).join("") || empty("Ask anything about the target. An agent answers it first thing next round.")}</div></div></div>`;
+
+    // Three ways in: the picture and the short version first, then the full explanations, then the questions going both ways.
+    const tabs = [["overview", "Overview", ""], ["topics", "Explained", d.topics.length], ["questions", "Questions", forYou.length || ""]];
+    if (!tabs.some(t => t[0] === S.utab)) S.utab = "overview";
+    const seg = `<div class="seg" role="group" aria-label="Parts of this page">${tabs.map(([k, label, n]) =>
+      `<button data-utab="${k}" data-fk="utab:${k}" aria-pressed="${S.utab === k}">${label}${n === "" ? "" : " " + n}</button>`).join("")}</div>`;
+    if (S.utab === "topics") return seg + topicsHtml;
+    if (S.utab === "questions") return seg + h;
+    const pictures = d.topics.filter(t => t.diagram), first = body => md(String(body || "").split(/\n\s*\n/)[0]);
+    return setup + seg
+      + (pictures.length ? pictures.map(t => `<div class="box glass"><div class="row" style="margin-bottom:12px"><h2>${esc(t.key)}</h2><span class="pill ${t.state[1]}">${t.state[0]}</span></div>${drawDiagram(t.diagram, t.key)}</div>`).join("")
+        : `<div class="box glass"><h2>How it fits together</h2><div class="sub">No picture yet. Agents can describe the parts and how they connect, and it is drawn here.</div>
+            ${survey && !d.topics.length ? "" : `<div class="actions">${small("draw", "Ask the agents to draw it", "", "")}</div>`}</div>`)
+      + `<div class="box glass"><h2>In short</h2>${d.topics.map(t => `<div class="card"><div class="row"><b style="font-weight:500">${esc(t.key)}</b><span class="pill ${t.state[1]}">${t.state[0]}</span></div>
+          <div class="md mt">${first(t.body)}</div></div>`).join("") || empty("Nothing has been written yet")}
+          ${d.topics.length ? `<div class="actions">${small("goto", "Read the full explanations")}</div>` : ""}</div>`;
+  },
+
+  runs(p, d) {
+    const count = s => d.runs.filter(r => r.state === s).length;
+    const filters = [["all", "All", d.runs.length], ...Object.keys(STATE).map(s => [s, STATE[s][0], count(s)]).filter(f => f[2])];
+    if (!filters.some(f => f[0] === S.filter)) S.filter = "all";
+    const list = d.runs.filter(r => (S.filter === "all" || r.state === S.filter) && hit(r.text, r.agent, r.area, r.verdict && r.verdict.text)).reverse();
+    const row = r => {
+      const [label, cls] = STATE[r.state], v = r.verdict;
+      const nums = r.probe ? (v ? esc(v.text || "Replayed by the verifier") : "Sent for the verifier to measure; does not count as a result")
+        : [typeof r.score === "number" ? `Claimed <b class="num">${fmt(r.score)}</b>` : "", v && typeof v.score === "number" ? `Verifier measured <b class="num">${fmt(v.score)}</b>` : ""].filter(Boolean).join(" · ");
+      const detail = [v && v.text ? "Verifier: " + v.text : "", r.artifact !== undefined ? "Artifact:\n" + JSON.stringify(r.artifact, null, 2) : ""].filter(Boolean).join("\n\n");
+      return `<div class="card"><div class="row"><span class="tags"><span class="pill ${cls}">${label}</span>${r.first ? `<span class="pill solid">${d.unique ? "New" : "New best"}</span>` : ""}${who(r)}${r.area ? `<span class="pill">${esc(r.area)}</span>` : ""}</span><span class="sub nowrap">${ago(r.ts)}</span></div>
+        <div class="mt">${esc(r.text)}</div>${nums ? `<div class="sub">${nums}</div>` : ""}${more("run:" + r.id, "details", detail)}</div>`;
+    };
+    return `${d.m && !d.m.verified ? `<div class="box glass sub">No verifier is set up for this project. Scores shown are the agents' own claims. Add a <code>verify</code> command to this project's project.json to have every run re-scored.</div>` : ""}
+      <div class="seg" role="group" aria-label="Filter runs">${filters.map(([k, label, n]) => `<button data-filter="${k}" data-fk="filter:${k}" aria-pressed="${S.filter === k}">${label} ${n}</button>`).join("")}</div>
+      <div class="box glass">${list.length ? paged("runs:" + S.filter, list, 12, row) : empty(d.runs.length ? "No matches" : "No runs reported yet")}</div>`;
+  },
+
+  tasks(p, d) {
+    return board(p, "tasks", [["queued", "Queued"], ["running", "Running"], ["review", "Needs review"], ["done", "Done"]], d.tasks, null, true);
+  },
+
+  section(p, d, sec) {
+    const all = [...(d.items.get(sec.id) || new Map()).values()], statuses = Array.isArray(sec.statuses) ? sec.statuses : [];
+    if (!all.length) return bare(`Nothing in ${sec.title || sec.id} yet. Agents add entries by reporting an item with section "${sec.id}".`);
+    const match = all.filter(i => hit(i.key, i.text, i.status, i.agent, i.body, typeof i.value === "string" ? i.value : "", ...Object.values(i.data || {}).map(String)));
+    const none = bare("No matches"), cell = v => v === undefined || v === null ? "–" : typeof v === "number" ? fmt(v) : String(v);
+
+    if (sec.view === "stats")
+      return match.length ? `<div class="tiles">${match.map(i => `<div class="tile glass"><b title="${esc(cell(i.value))}">${esc(cell(i.value))}</b><span class="sub">${esc(i.key)}</span>
+        ${i.text ? `<div class="sub">${esc(i.text)}</div>` : ""}</div>`).join("")}</div>` : none;
+
+    if (sec.view === "note")
+      {
+        const sorted = [...match].sort((x, y) => new Date(y.ts) - new Date(x.ts)), more = S.open.has("notes-all:" + sec.id), shown = sorted.slice(0, more ? 200 : 8);
+        return match.length ? shown.map(i => {
+          const text = i.body || i.text || "", key = "note:" + sec.id + ":" + i.key, long = text.length > 420 || text.split("\n").length > 7, open = !long || S.open.has(key);
+          // A long note opens as its first paragraph only, so a page of many rounds stays short enough to scan.
+          const preview = text.split(/\n\s*\n/)[0].slice(0, 420);
+          return `<div class="box glass"><div class="row"><h2>${esc(i.key)}</h2><span class="tags">${who(i)}<span class="sub nowrap">${ago(i.ts)}</span></span></div>
+            <div class="md mt2">${md(open ? text : preview)}</div>
+            ${long ? `<div class="actions"><button class="btn small ghost" data-open="${esc(key)}" data-fk="open:${esc(key)}" aria-expanded="${open}">${open ? "Show less" : "Show the whole note"}</button></div>` : ""}</div>`;
+        }).join("") + (sorted.length > 8 ? `<div class="actions" style="margin-bottom:16px"><button class="btn small ghost" data-open="notes-all:${esc(sec.id)}" data-fk="open:notes-all">${more ? "Show only the latest 8" : `Show all ${sorted.length}`}</button></div>` : "") : none;
+      }
+
+    if (sec.view === "table") {
+      const cols = Array.isArray(sec.columns) && sec.columns.length ? sec.columns : [...new Set(all.flatMap(i => Object.keys(i.data || {})))];
+      const numeric = c => all.every(i => !i.data || i.data[c] === undefined || typeof i.data[c] === "number");
+      return `<div class="box glass"><div class="scrollx" data-keep="table:${esc(sec.id)}"><table>
+        <tr><th>${esc(sec.title || sec.id)}</th>${cols.map(c => `<th class="${numeric(c) ? "r" : ""}">${esc(c)}</th>`).join("")}${statuses.length ? "<th>Status</th>" : ""}<th class="r">Updated</th></tr>
+        ${match.map(i => `<tr><td>${esc(i.key)}</td>${cols.map(c => `<td class="${numeric(c) ? "r" : ""}">${esc(cell((i.data || {})[c]))}</td>`).join("")}
+          ${statuses.length ? `<td>${statusPill(i.status, sec)}</td>` : ""}<td class="r sub">${ago(i.ts)}</td></tr>`).join("") || `<tr><td colspan="${cols.length + 3}" class="empty">No matches</td></tr>`}
+        </table></div></div>`;
+    }
+
+    if (sec.view === "chart") {
+      const series = [...(d.points.get(sec.id) || new Map())].map(([name, values]) => ({ name, values }));
+      if (!series.length) return bare("No numbers reported yet. A chart needs items with a numeric value.");
+      return `<div class="box glass">${seriesChart(series.slice(0, 5), sec.title || sec.id)}
+        ${series.length > 5 ? `<div class="sub mt">Showing the first 5 of ${series.length} lines.</div>` : ""}</div>`;
+    }
+    if (sec.view === "board" && statuses.length) {
+      const extra = [...new Set(all.map(i => i.status || "").filter(s => !statuses.includes(s)))];
+      return board(p, sec.id, [...statuses, ...extra].map(s => [s, s ? cap(s) : "No status"]), all, sec, false);
+    }
+    const shown = all.filter(i => hit(i.key, i.text, i.status, i.agent));
+    let bar = "";
+    if (sec.progress && statuses.length > 1) {
+      const n = s => all.filter(i => i.status === s).length, last = statuses[statuses.length - 1], first = statuses[0], mid = all.length - n(last) - n(first);
+      bar = `<div class="box glass"><div class="row"><h2>${n(last)} of ${all.length} ${esc(last)}</h2><span class="sub">${mid} in progress, ${n(first)} ${esc(first)}</span></div>
+        <div class="bar"><i class="e" style="width:${100 * n(last) / all.length}%"></i><i class="p" style="width:${100 * mid / all.length}%"></i></div>
+        <div class="sub">White is ${esc(last)}, blue is in progress, the rest is ${esc(first)}.</div>
+        <div class="mt2">${sec.measured
+          ? `<span class="pill ok">Measured by the verifier</span> <span class="sub">Counted in ${esc(sec.unit || "hits")} as it replays runs and probes: ${Object.entries(sec.measured).map(([k, n]) => `${esc(k)} from ${fmt(n)}`).join(", ")}. Agents cannot set this.</span>`
+          : `<span class="pill">Reported by agents</span> <span class="sub">Each status is an agent's own judgement. Nothing checks it.</span>`}</div></div>`;
+    }
+    return bar + (shown.length ? paged("grid:" + sec.id, shown, 18, i => itemCard(p, d, sec, i), html => `<div class="grid">${html}</div>`) : bare("No matches"));
+  },
+
+  agents(p, d) {
+    const cards = d.agents.filter(a => hit(a.name, a.harness, a.host)).map(a => {
+      const on = live(a.ts), verifier = a.harness === "verifier.py";
+      return `<div class="box glass"><div class="row"><h2><span class="dot ${on ? "" : "idle"}"></span>${esc(a.name)}</h2><span class="pill ${on ? "ok" : ""}">${on ? "Live" : "Idle"}</span></div>
+        <div class="sub">${esc(a.harness || "Unknown harness")}${verifier ? "" : `, model ${esc(a.model || "not reported")}`}, on ${esc(a.host || "unknown host")}</div>
+        <div class="card mt2"><div class="sub">Doing</div>${esc(a.doing || "Nothing reported")}</div>
+        ${verifier ? "" : `<div class="card"><div class="sub">Task</div>${a.task ? esc(a.task.text) : "None"}</div>`}
+        <div class="sub mt2">${plural(a.runs, "run")} ${verifier ? "checked" : "reported"}, ${plural(a.events, "event")}, last seen ${ago(a.ts).toLowerCase()}</div></div>`;
+    }).join("");
+    return cards ? `<div class="grid">${cards}</div>` : bare(d.agents.length ? "No matches" : "No agent has reported yet. The Connect page shows how to point one here.");
+  },
+
+  tools(p, d) {
+    const rows = d.tools.filter(t => hit(t.name, ...t.agents)), total = Math.max(1, d.tools.reduce((n, t) => n + t.calls, 0));
+    if (!d.tools.length) return bare("No tool calls reported yet. A harness reports one by sending an event of type \"tool\".");
+    return `<div class="box glass"><div class="scrollx" data-keep="tools"><table>
+      <tr><th>Tool</th><th>Share of calls</th><th class="r">Calls</th><th class="r">Failed</th><th class="r">Average time</th><th>Used by</th><th class="r">Last used</th></tr>
+      ${rows.map(t => `<tr><td>${esc(t.name)}</td><td><div class="row"><div class="meter grow"><i style="width:${100 * t.calls / total}%"></i></div><span class="sub num nowrap">${Math.round(100 * t.calls / total)}%</span></div></td><td class="r">${t.calls}</td>
+        <td class="r">${t.fails ? `<span class="pill bad">${t.fails} (${Math.round(100 * t.fails / t.calls)}%)</span>` : "0"}</td>
+        <td class="r">${t.timed ? (t.ms / t.timed >= 1000 ? (t.ms / t.timed / 1000).toFixed(1) + " s" : Math.round(t.ms / t.timed) + " ms") : "–"}</td>
+        <td><span class="tags">${[...t.agents].map(a => `<span class="pill">${esc(a)}</span>`).join("")}</span></td><td class="r sub">${ago(t.ts)}</td></tr>`).join("") || `<tr><td colspan="7" class="empty">No matches</td></tr>`}
+      </table></div></div>`;
+  },
+
+  connect(p) {
+    const o = location.origin, id = p.id;
+    const block = (key, title, why, code) => `<div class="box glass"><div class="row"><h2>${title}</h2><button class="btn small ghost" data-copy="${key}" data-fk="copy:${key}">Copy</button></div>
+      <div class="sub">${why}</div><pre id="copy-${key}">${esc(code)}</pre></div>`;
+    return block("loop", "Run an agent nonstop", "Copy loop.py to the machine. It starts your harness fresh each round with this project's brief: the routine to follow plus where things stand right now. Everything after -- is your own harness command.",
+`export PROJECT_VIEW_URL=${o}
+python3 loop.py ${id} --agent vm-1/my-harness -- claude -p
+
+# The brief it feeds the harness each round:
+curl -s '${o}/api/brief?project=${id}&agent=vm-1/my-harness'`)
+    + block("curl", "Any harness, over HTTP", "One request per update. Works from a shell loop, a hook, or any language.",
+`curl -X POST ${o}/api/events \\
+  -H "Content-Type: application/json" \\
+  -H "Authorization: Bearer $PROJECT_VIEW_TOKEN" \\
+  -d '{"project": "${id}", "type": "activity", "text": "Starting up", "agent": "vm-1/my-harness"}'`)
+    + block("mcp", "Harnesses that speak MCP", "Adds four tools: report, next_task, get_project and define_section. The first line is for Claude Code; the JSON is the generic form.",
+`claude mcp add --transport http project-view ${o}/mcp
+
+{
+  "mcpServers": {
+    "project-view": {
+      "type": "http",
+      "url": "${o}/mcp",
+      "headers": { "Authorization": "Bearer <token>" }
+    }
+  }
+}`)
+    + block("emit", "From a script, with emit.py", "Copy emit.py to the machine. It needs only Python.",
+`export PROJECT_VIEW_URL=${o}
+export PROJECT_VIEW_TOKEN=<token>
+export PROJECT_VIEW_AGENT=vm-1/my-harness
+
+python3 emit.py ${id} activity "Training for 5 minutes"
+python3 emit.py ${id} run "Cosine, peak 0.3" --score 0.41 --artifact '{"peak": 0.3}'
+python3 emit.py ${id} tool Bash --ok --ms 1200`)
+    + `<div class="box glass"><h2>What to report</h2><div class="scrollx"><table>
+      <tr><th>Type</th><th>Use it for</th><th>Fields beyond text</th></tr>
+      <tr><td>activity</td><td>What the agent is doing right now</td><td class="sub">agent</td></tr>
+      <tr><td>run</td><td>One attempt at the goal. The verifier re-scores it from the artifact. With probe set, it is only measured for coverage and never counts as a result</td><td class="sub">score, artifact, area, probe</td></tr>
+      <tr><td>finding</td><td>Something learned</td><td class="sub">body</td></tr>
+      <tr><td>question</td><td>Something a person should answer. Also how an agent answers one of yours: send its id and an answer</td><td class="sub">id, answer</td></tr>
+      <tr><td>topic</td><td>An entry on the Understanding page, written so a newcomer can learn the target. The same key replaces it</td><td class="sub">key, body</td></tr>
+      <tr><td>proposal</td><td>During setup: the survey agent's proposed goal, metric, map and scoring script, for you to approve</td><td class="sub">body, config, scorer</td></tr>
+      <tr><td>item</td><td>An entry on one of this project's own pages: a card, a table row, a chart point, a key number or a note</td><td class="sub">section, key, status, body, value, data</td></tr>
+      <tr><td>task</td><td>Create a task or change its status</td><td class="sub">id, status, area</td></tr>
+      <tr><td>tool</td><td>One tool call, named in text</td><td class="sub">ok, ms</td></tr>
+      </table></div>
+      <p class="sub mt2">To take work from the queue, POST <code>{"project": "${esc(id)}", "agent": "…"}</code> to <code>/api/claim</code>. Requests from this machine need no token. From anywhere else, the server must be started with a token and every write must send it.</p></div>`;
+  },
+};
+
+/* ---------- rendering ---------- */
+let lastSig = "", lastRail = "", lastProj = "", lastPage = "", pressing = false;
+addEventListener("pointerdown", () => { pressing = true; }, true);
+for (const type of ["pointerup", "pointercancel", "blur"]) addEventListener(type, () => { pressing = false; setTimeout(() => render(false), 0); }, true);
+function selecting() {
+  const s = getSelection();
+  return s && !s.isCollapsed && $("#view").contains(s.anchorNode);
+}
+function render(force) {
+  const { p, list, page } = route(), ev = p ? (S.events[p.id] || []) : [];
+  const sig = JSON.stringify([S.connected, S.loaded, p && p.id, page && page.id, S.q, [...S.open], S.filter, S.utab, S.limit, S.projects.map(x => [x.id, x.config, x.hold, (x.notable || []).length, (x.working || []).join()]), ev.length, Math.floor(Date.now() / 20000)]);
+  // A background refresh must never pull the page out from under the reader: wait while text is selected or a
+  // click is in progress (replacing a button between press and release would swallow the click).
+  if (!force && (sig === lastSig || selecting() || pressing)) return;
+  lastSig = sig;
+
+  $("#conn").hidden = S.connected;
+  $("#new").hidden = !p;
+  $("#pause").hidden = !p;
+  if (p) $("#pause").textContent = p.config.paused ? "Resume agents" : "Pause agents";
+  const ids = S.projects.map(x => x.id).join("\n"), sel = $("#proj");
+  if (ids !== lastProj) { lastProj = ids; sel.innerHTML = S.projects.map(x => `<option value="${esc(x.id)}">${esc(x.id)}</option>`).join(""); }
+  sel.hidden = S.projects.length < 2;
+  if (p && sel.value !== p.id) sel.value = p.id;
+
+  const rail = `<div class="logo">${icon("mark")}</div>` + list.map(x =>
+    `<a href="${href(p.id, x.id)}" class="${x === page ? "on" : ""}${x.push ? " push" : ""}" title="${esc(x.title)}" data-fk="nav:${esc(x.id)}" ${x === page ? 'aria-current="page"' : ""}>${icon(x.icon)}<span>${esc(x.title)}</span></a>`).join("");
+  const fk = document.activeElement && document.activeElement.dataset ? document.activeElement.dataset.fk : null;
+  if (rail !== lastRail) { lastRail = rail; $("#rail").innerHTML = rail; }
+
+  const keep = {};
+  document.querySelectorAll("#view [data-keep]").forEach(el => keep[el.dataset.keep] = [el.scrollTop, el.scrollLeft]);
+  if (!S.loaded) $("#view").innerHTML = S.connected ? `<p class="empty">Loading…</p>` : `<div class="box glass"><h2>Cannot reach the server</h2><div class="sub">Start it with <code>python3 server.py</code>. This page will reconnect by itself.</div></div>`;
+  else if (!p) $("#view").innerHTML = `<div class="box glass"><h2>No projects yet</h2><div class="sub">A project appears as soon as any harness reports to it. For example:</div>
+    <pre>${esc(`curl -X POST ${location.origin}/api/events -H "Content-Type: application/json" \\\n  -d '{"project": "my-project", "type": "activity", "text": "Hello", "agent": "me"}'`)}</pre></div>`;
+  else {
+    const d = derive(p), body = page.section ? views.section(p, d, page.section) : views[page.id](p, d);
+    const waiting = badge();
+    document.title = `${waiting ? "(" + waiting + ") " : ""}${page.title} · ${p.id}`;
+    $("#view").innerHTML = `<div class="box glass pagehead"><div class="head"><h1>${esc(page.title)}</h1><span class="pill">${esc(p.id)}</span>${p.config.phase === "survey" ? `<span class="pill info">Setting up</span>` : ""}${p.hold ? `<span class="pill info">On hold: ${esc(p.hold)}</span>` : ""}</div>
+      <p class="goal">${esc(p.config.goal || p.config.summary || (p.config.phase === "survey" ? "The goal will be proposed by the survey agent for you to approve." : "No goal set for this project yet."))}</p></div>` + body;
+  }
+  document.querySelectorAll("#view [data-keep]").forEach(el => { const k = keep[el.dataset.keep]; if (k) { el.scrollTop = k[0]; el.scrollLeft = k[1]; } });
+  const where = (p ? p.id : "") + "/" + (page ? page.id : "");
+  if (where !== lastPage) { lastPage = where; $("#main").scrollTop = 0; if (Object.keys(S.limit).length) { S.limit = {}; return render(true); } }
+  if (fk && document.activeElement === document.body) { const el = document.querySelector(`[data-fk="${CSS.escape(fk)}"]`); if (el) el.focus({ preventScroll: true }); }
+}
+
+/* ---------- data ---------- */
+async function getJSON(url) {
+  const r = await fetch(url, { cache: "no-store" });
+  if (!r.ok) throw new Error(r.status);
+  return r.json();
+}
+let timer = 0, busy = false, again = false;
+async function poll() {
+  if (busy) { again = true; return; }
+  busy = true; clearTimeout(timer);
+  try {
+    S.projects = await getJSON("/api/projects");
+    const { p } = route();
+    if (p) {
+      const have = S.events[p.id] || (S.events[p.id] = []);
+      if (S.epoch[p.id] !== p.epoch || p.count < have.length) { have.length = 0; S.epoch[p.id] = p.epoch; }  // server restarted: refetch
+      while (have.length < p.count) {
+        const got = (await getJSON(`/api/events?project=${encodeURIComponent(p.id)}&after=${have.length}`)).events;
+        if (!got.length) break;
+        have.push(...got);
+      }
+    }
+    S.connected = true; S.loaded = true;
+    let fresh = false;
+    for (const p of S.projects) if (!(p.id in S.seen)) { S.seen[p.id] = (p.notable || []).reduce((m, n) => n.ts > m ? n.ts : m, new Date().toISOString()); fresh = true; }
+    if (fresh) store.set("pv-seen", S.seen);
+    const unseen = notes().unseen, first = S.told === null;
+    if (first) S.told = new Set();
+    for (const n of unseen) {
+      const key = n.project + n.ts + n.text;
+      if (S.told.has(key)) continue;
+      S.told.add(key);
+      if (!first && S.notify && document.hidden && "Notification" in window && Notification.permission === "granted") new Notification("Project View: " + n.project, { body: n.text });
+    }
+    if ($("#drawer").open) renderDrawer();
+    if ($("#settings").open && !pressing) renderSettings();
+  } catch (e) { S.connected = false; }
+  busy = false;
+  render(false);
+  if (again) { again = false; poll(); } else timer = setTimeout(poll, 2000);
+}
+async function send(path, body) {
+  try {
+    const r = await fetch(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    if (!r.ok) {  // the server says why in plain words (a name already taken, a missing field); show that
+      const why = await r.json().then(j => j && j.error, () => null);
+      toast(why ? "Not saved: " + why : "Could not save that.");
+      return false;
+    }
+    poll();
+    return true;
+  } catch (e) { toast("Could not save that. Check the server is still running."); return false; }
+}
+let toastTimer = 0;
+function toast(text) {
+  $("#toast").textContent = text; $("#toast").hidden = false;
+  clearTimeout(toastTimer); toastTimer = setTimeout(() => { $("#toast").hidden = true; }, 4000);
+}
+
+/* ---------- interaction ---------- */
+addEventListener("hashchange", () => { render(true); poll(); });
+$("#q").addEventListener("input", e => { S.q = e.target.value.trim().toLowerCase(); render(true); });
+$("#proj").addEventListener("change", e => { location.hash = "#/" + encodeURIComponent(e.target.value); });
+document.addEventListener("click", async e => {
+  const b = e.target.closest("button");
+  if (!b) return;
+  if (b.dataset.open) { S.open.has(b.dataset.open) ? S.open.delete(b.dataset.open) : S.open.add(b.dataset.open); render(true); }
+  else if (b.dataset.filter) { S.filter = b.dataset.filter; render(true); }
+  else if (b.dataset.utab) { S.utab = b.dataset.utab; render(true); }
+  else if (b.dataset.more) { const step = Number(b.dataset.step) || 10; S.limit[b.dataset.more] = (S.limit[b.dataset.more] || step) + step * 2; render(true); }
+  else if (b.dataset.task) {
+    const { p } = route(), t = p && derive(p).tasks.find(t => t.id === b.dataset.task);
+    if (!t) return;
+    b.disabled = true;
+    await send("/api/events", { project: p.id, type: "task", id: t.id, text: t.text, status: b.dataset.status, agent: b.dataset.status === "queued" ? "" : t.agent, source: t.source, area: t.area });
+  }
+  else if (b.dataset.act) await act(b);
+  else if (b.dataset.copy) {
+    const el = $("#copy-" + b.dataset.copy);
+    try { await navigator.clipboard.writeText(el.textContent); toast("Copied"); }
+    catch (err) { const r = document.createRange(); r.selectNodeContents(el); getSelection().removeAllRanges(); getSelection().addRange(r); toast("Selected. Press Ctrl+C or Cmd+C to copy."); }
+  }
+});
+/* ---------- notifications: what was found and what needs you, across every project ---------- */
+const KIND = { found: ["Found", "ok"], mismatch: ["Mismatch", "bad"], question: ["Question", ""], setup: ["Setup", "info"], review: ["Review", "info"], answered: ["Answered", "ok"], stopped: ["Stopped", ""] };
+const store = { get: (k, fallback) => { try { return JSON.parse(localStorage.getItem(k)) ?? fallback; } catch (e) { return fallback; } }, set: (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) {} } };
+S.seen = store.get("pv-seen", {});
+S.notify = store.get("pv-notify", false);
+function notes() {
+  const open = [], recent = [];
+  for (const p of S.projects) for (const n of p.notable || []) (n.open ? open : recent).push({ ...n, project: p.id, unseen: n.ts > (S.seen[p.id] || "") });
+  recent.sort((a, b) => a.ts < b.ts ? 1 : -1);
+  return { open, recent, unseen: open.concat(recent).filter(n => n.unseen) };
+}
+function noteRow(n) {
+  const [label, cls] = KIND[n.kind] || ["Note", ""];
+  return `<a class="need" href="${href(n.project, n.page || "overview")}">${n.unseen ? `<span class="new-dot" title="New since you last looked"></span>` : ""}<span class="pill ${cls}">${label}</span>
+    <span class="txt">${esc(n.text)}<br><span class="sub">${esc(n.project)} · ${ago(n.ts).toLowerCase()}</span></span></a>`;
+}
+function renderDrawer() {
+  const { open, recent } = notes();
+  $("#drawer-body").innerHTML = `<h3>Needs you (${open.length})</h3>${open.map(noteRow).join("") || empty("Nothing is waiting on you")}
+    <h3>What happened</h3>${recent.slice(0, 30).map(noteRow).join("") || empty("Nothing to report yet")}`;
+}
+function badge() {
+  const n = notes().unseen.length;
+  $("#bell-n").hidden = !n; $("#bell-n").textContent = n;
+  return n;
+}
+function markSeen() {
+  for (const p of S.projects) for (const n of p.notable || []) if (n.ts > (S.seen[p.id] || "")) S.seen[p.id] = n.ts;
+  store.set("pv-seen", S.seen); render(true);
+}
+$("#bell").addEventListener("click", () => { renderDrawer(); $("#drawer").showModal(); $("#drawer-close").focus(); });
+$("#drawer-close").addEventListener("click", () => $("#drawer").close());
+$("#drawer").addEventListener("close", markSeen);
+$("#drawer").addEventListener("click", e => { if (e.target === $("#drawer") || e.target.closest("a.need")) $("#drawer").close(); });
+
+/* ---------- settings: how this project runs, and how the page looks on this computer ---------- */
+function renderSettings() {
+  const { p } = route(), away = (p && p.config.away) || {}, theme = store.get("pv-theme", "dark");
+  const pick = (attr, value, label, on) => `<button ${attr}="${value}" aria-pressed="${on}">${label}</button>`;
+  const until = away.until ? new Date(away.until) : null;
+  $("#settings-body").innerHTML = (p ? `<h3>How ${esc(p.id)} runs</h3>
+      <div class="sub">Agents working at the same time</div><div class="seg mt" role="group" aria-label="Agents working at the same time">${[[0, "No limit"], [1, "1"], [2, "2"], [3, "3"], [5, "5"]].map(([n, label]) => pick("data-away-agents", n, label, (away.max_agents || 0) === n)).join("")}</div>
+      <div class="sub" style="margin-bottom:14px">${(p.working || []).length ? "Working now: " + esc(p.working.join(", ")) + "." : "No agent holds a slot right now."} An agent over the limit finishes its round, then waits its turn.</div>
+      <div class="sub">If something needs you</div><div class="seg mt" role="group" aria-label="If something needs you">${pick("data-away-block", "continue", "Keep working on other things", away.when_blocked !== "pause")}${pick("data-away-block", "pause", "Stop until I respond", away.when_blocked === "pause")}</div>
+      <div class="sub" style="margin-bottom:14px">"Needs you" means an agent's question, a task waiting for review, or a setup proposal.</div>
+      <div class="sub">Let agents keep running for</div><div class="seg mt" role="group" aria-label="Let agents keep running for">${[[0, "No limit"], [1, "1 hour"], [4, "4 hours"], [8, "8 hours"]].map(([h, label]) => pick("data-away-hours", h, label, h === 0 && !until)).join("")}</div>
+      <div class="sub">${until ? (until > new Date() ? `Agents stop at ${until.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}${until.toDateString() === new Date().toDateString() ? "" : " on " + until.toLocaleDateString()}. Pick a length again to restart the clock.` : "The time you allowed has ended, so agents are on hold. Pick a length to start them again.") : "No time limit is set."}
+        ${p.hold ? ` Right now: on hold, ${esc(p.hold)}.` : ""}</div>` : "")
+    + `<h3>On this computer</h3>
+      <div class="sub">Appearance</div><div class="seg mt" role="group" aria-label="Appearance">${[["dark", "Dark"], ["light", "Light"], ["system", "Match my system"]].map(([k, label]) => pick("data-theme-pick", k, label, theme === k)).join("")}</div>
+      <div class="sub">Desktop notifications when this tab is in the background</div><div class="seg mt" role="group" aria-label="Desktop notifications">${pick("data-notify", "1", "On", S.notify)}${pick("data-notify", "0", "Off", !S.notify)}</div>`;
+}
+function applyTheme(choice) {
+  store.set("pv-theme", choice);
+  document.documentElement.dataset.theme = choice === "light" || choice === "dark" ? choice : matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
+}
+matchMedia("(prefers-color-scheme: light)").addEventListener("change", () => { if (store.get("pv-theme", "dark") === "system") applyTheme("system"); });
+$("#gear").addEventListener("click", () => { renderSettings(); $("#settings").showModal(); $("#settings-close").focus(); });
+$("#settings-close").addEventListener("click", () => $("#settings").close());
+$("#settings").addEventListener("click", async e => {
+  if (e.target === $("#settings")) return $("#settings").close();
+  const b = e.target.closest("button"), { p } = route();
+  if (!b) return;
+  if (b.dataset.themePick) { applyTheme(b.dataset.themePick); renderSettings(); }
+  else if (b.dataset.notify !== undefined) {
+    S.notify = b.dataset.notify === "1" && "Notification" in window && (await Notification.requestPermission()) === "granted";
+    if (b.dataset.notify === "1" && !S.notify) toast("Notifications are blocked for this page in your browser.");
+    store.set("pv-notify", S.notify); renderSettings();
+  } else if (p && (b.dataset.awayBlock || b.dataset.awayHours !== undefined || b.dataset.awayAgents !== undefined)) {
+    const away = { ...(p.config.away || {}) };
+    if (b.dataset.awayAgents !== undefined) { const n = Number(b.dataset.awayAgents); if (n) away.max_agents = n; else delete away.max_agents; }
+    else if (b.dataset.awayBlock) away.when_blocked = b.dataset.awayBlock;
+    else { const h = Number(b.dataset.awayHours); if (h) away.until = new Date(Date.now() + h * 3600000).toISOString(); else delete away.until; }
+    if (await send("/api/project", { project: p.id, away })) { p.config.away = away; renderSettings(); }
+  }
+});
+
+/* One dialog for every time the person types something: resolves with their text, or null if they cancel. */
+let askDone = null;
+function askText({ title, hint = "", value = "", placeholder = "", button = "Save", required = true, input = true }) {
+  $("#ask-h").textContent = title; $("#ask-hint").textContent = hint; $("#ask-hint").hidden = !hint;
+  const box = $("#ask-text");
+  box.hidden = !input; box.value = value; box.placeholder = placeholder; box.required = input && required;
+  $("#ask-ok").textContent = button;
+  $("#ask").showModal();
+  if (input) { box.focus(); box.setSelectionRange(box.value.length, box.value.length); } else $("#ask-ok").focus();
+  return new Promise(resolve => { askDone = resolve; });
+}
+$("#ask-form").addEventListener("submit", e => { e.preventDefault(); const done = askDone; askDone = null; $("#ask").close(); if (done) done($("#ask-text").value.trim()); });
+$("#ask-cancel").addEventListener("click", () => $("#ask").close());
+$("#ask").addEventListener("close", () => { if (askDone) { const done = askDone; askDone = null; done(null); } });
+$("#ask-text").addEventListener("keydown", e => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); $("#ask-form").requestSubmit(); } });
+
+/* Everything the person does on the Understanding page. Each is reported as the person, so agents treat it as authoritative. */
+async function act(b) {
+  const { p } = route();
+  if (!p) return;
+  const d = derive(p), key = b.dataset.key, id = b.dataset.id, you = body => send("/api/events", { project: p.id, source: "you", ...body });
+  const kind = b.dataset.act;
+  if (kind === "confirm") await you({ type: "review", key, status: "confirmed" });
+  else if (kind === "unclear" || kind === "simpler") {
+    const note = await askText({ title: kind === "simpler" ? `Explain "${key}" more simply` : `What don't you follow in "${key}"?`, required: false, button: "Send to the agents",
+      hint: "Optional, but the more specific you are, the better the rewrite. An agent will redo this topic first thing next round.", placeholder: kind === "simpler" ? "For example: I don't know what a length byte is" : "For example: step 3 loses me" });
+    if (note === null) return;
+    await you({ type: "review", key, status: kind, text: note });
+    await you({ type: "task", status: "queued", text: `Rewrite the topic "${key}" on the Understanding page ${kind === "simpler" ? "in simpler terms, assuming less background" : "so it can be followed"}.` + (note ? ` The reader said: "${note}"` : "") });
+  }
+  else if (kind === "edit" || kind === "addnote") {
+    let title = key;
+    if (kind === "addnote") { title = await askText({ title: "Title for your note", hint: "A few words. Agents will treat what you write as fact.", placeholder: "For example: What I care about most", button: "Next" }); if (!title) return; }
+    const old = d.topics.find(t => t.key === title);
+    const body = await askText({ title: kind === "edit" ? `Edit "${title}"` : title, value: old ? old.body : "", hint: "Markdown works. Saving marks this topic as written by you, and agents will not overwrite it unless they find it to be wrong." });
+    if (body) await you({ type: "topic", key: title, body });
+  }
+  else if (kind === "ask") {
+    const text = await askText({ title: key ? `Ask about "${key}"` : "Ask the agents a question", button: "Ask", hint: "An agent answers at the start of its next round, and the answer appears on this page.", placeholder: "For example: why does a zero width matter?" });
+    if (text) await you({ type: "question", text, ...(key ? { key } : {}) });
+  }
+  else if (kind === "answer") {
+    const q = d.questions.find(x => x.id === id);
+    const text = await askText({ title: "Your answer", hint: q ? q.text : "", button: "Send answer" });
+    if (text) await you({ type: "question", id, answer: text });
+  }
+  else if (kind === "goto") { S.utab = "topics"; render(true); $("#main").scrollTop = 0; }
+  else if (kind === "draw") { if (await you({ type: "task", status: "queued", text: "Add a diagram to the Understanding page showing the main parts of the target and how they connect, for someone seeing it for the first time." })) toast("Asked. It will be drawn in the next round."); }
+  else if (kind === "seed") await you({ type: "task", status: "queued", text: "Write the Understanding page for a newcomer: what the target is and what it is for, how it works step by step, its parts, where problems are likely, and the words to know." });
+  else if (kind === "sendback") {
+    const text = await askText({ title: "What should change in the proposal?", button: "Send back", hint: "The survey agent will revise the proposal to deal with this." });
+    if (!text) return;
+    await you({ type: "proposal", id, status: "returned", answer: text });
+    await you({ type: "task", status: "queued", text: `Revise the setup proposal and send a new one. The person said: "${text}"` });
+  }
+  else if (kind === "approve") {
+    const ok = await askText({ title: "Approve this setup and start the project?", input: false, button: "Approve and start",
+      hint: "The proposed goal, pages and map become the project. The scoring script is saved on this machine and the verifier will run it on every result, so only approve if you have read it. Agents can start working as soon as you do." });
+    if (ok === null) return;
+    b.disabled = true;
+    if (await send("/api/approve", { project: p.id, id })) { toast("Approved. The project is now running."); location.hash = href(p.id, "overview"); }
+  }
+}
+
+$("#newproj").addEventListener("click", () => { $("#np-form").reset(); $("#np").showModal(); $("#np-name").focus(); });
+$("#np-cancel").addEventListener("click", () => $("#np").close());
+$("#np-form").addEventListener("submit", async e => {
+  e.preventDefault();
+  const project = $("#np-name").value.trim();
+  $("#np-ok").disabled = true;
+  const ok = await send("/api/new", { project, target: $("#np-target").value.trim(), goal: $("#np-goal").value.trim() });
+  $("#np-ok").disabled = false;
+  if (ok) { $("#np").close(); location.hash = href(project, "understand"); }
+});
+$("#new").addEventListener("click", () => { $("#task").value = ""; $("#dlg").showModal(); $("#task").focus(); });
+$("#pause").addEventListener("click", async () => {
+  const { p } = route();
+  if (!p) return;
+  $("#pause").disabled = true;
+  await send("/api/project", { project: p.id, paused: !p.config.paused });
+  $("#pause").disabled = false;
+});
+$("#cancel").addEventListener("click", () => $("#dlg").close());
+$("#form").addEventListener("submit", async e => {
+  e.preventDefault();
+  const text = $("#task").value.trim(), { p } = route();
+  if (!text || !p) return;
+  $("#add").disabled = true;
+  const ok = await send("/api/events", { project: p.id, type: "task", text, status: "queued", source: "you" });
+  $("#add").disabled = false;
+  if (ok) { $("#dlg").close(); if (route().page.id !== "tasks") location.hash = href(p.id, "tasks"); }
+});
+setInterval(() => render(false), 5000);  // keeps "2 min ago" and live/idle fresh even when nothing new arrives
+poll();
+</script>
+</body>
+</html>

@@ -1,0 +1,12 @@
+# project data and agent scratch space are local to each machine
+projects/
+agent-work/
+STOP
+# generated
+__pycache__/
+*.pyc
+toys/*/answer_key.json
+toys/*/baseline.json
+# editor and tool settings
+.claude/
+.DS_Store
