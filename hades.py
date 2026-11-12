@@ -3,6 +3,8 @@
 
   python3 hades.py          check the install, then start the page and the verifier together, with a practice project ready
   python3 hades.py check    only check that this install works: a few seconds, no model needed, nothing left behind
+  python3 hades.py new <target> [name]   add a ready-made project from toys/: "tinyvm" (17 planted defects),
+                            or "stdlib" (25 real parsers from Python's standard library, no answer key)
 
 Options for the first form:
   --no-open        do not open the page in a browser
@@ -41,24 +43,29 @@ TOY = server.ROOT / "toys" / "tinyvm"
 HARNESSES = {"claude": "Claude Code", "codex": "Codex CLI", "omp": "OhMyPi"}
 
 
-def practice():
-    """Create the practice project if it is not there yet. Returns True if it was created."""
-    home = server.PROJECTS / PRACTICE
+def make(name, toy):
+    """Create the project `name` from toys/<toy>/project.json, if it is not there yet. Returns True if it was created.
+    The template is an ordinary project.json plus "seed" (the files every agent starts with) and "entries" (its map)."""
+    home, source = server.PROJECTS / name, server.ROOT / "toys" / toy
     if (home / "project.json").exists():
         return False
-    seed = home / "agent-files"  # what every agent starts with: the interpreter, and nothing else from toys/
+    cfg = json.loads((source / "project.json").read_text())
+    seed = home / "agent-files"  # agents get these files and nothing else from toys/
     seed.mkdir(parents=True, exist_ok=True)
-    shutil.copy(TOY / "tinyvm.py", seed)
-    cfg = json.loads((TOY / "practice.json").read_text())
+    for file in cfg.pop("seed", []):
+        shutil.copy(source / file, seed)
+    entries = cfg.pop("entries", [])
     cfg["agent_files"] = str(seed)
-    # The scoring script stays in toys/, next to the copy of the interpreter it replays against.
-    cfg["metric"]["verify"] = f"{shlex.quote(sys.executable)} {shlex.quote(str(TOY / 'score.py'))}"
+    # The scoring script stays in toys/, next to the copy of the target it replays against.
+    cfg["metric"]["verify"] = f"{shlex.quote(sys.executable)} {shlex.quote(str(source / 'score.py'))}"
     (home / "project.json").write_text(json.dumps(cfg, indent=2) + "\n")
-    sys.path.insert(0, str(TOY))
-    import tinyvm
-    for part in ["read_header", "read_constants"] + [handler.__name__ for handler in tinyvm.OPS.values()]:
-        server.ingest({"project": PRACTICE, "type": "item", "section": "parts", "key": part, "text": ""})
+    for entry in entries:
+        server.ingest({"project": name, "type": "item", "text": "", **entry})
     return True
+
+
+def practice():
+    return make(PRACTICE, "tinyvm")
 
 
 def check():
@@ -118,6 +125,7 @@ def check():
         return f"{len(text.splitlines())} lines"
 
     def scoring():
+        sys.path.insert(0, str(TOY))
         import tinyvm
         halt = next(code for code, handler in tinyvm.OPS.items() if handler.__name__ == "op_halt")
         crash, clean = b"TVM1\x01\x01\x09ab", b"TVM1\x00" + bytes([halt])
@@ -205,6 +213,16 @@ def offer_launch(yes):
 def main(argv):
     if argv[:1] == ["check"]:
         sys.exit(0 if check() else 1)
+    if argv[:1] == ["new"]:
+        toys = sorted(d.name for d in (server.ROOT / "toys").iterdir() if (d / "project.json").exists())
+        if len(argv) not in (2, 3) or argv[1] not in toys:
+            sys.exit("usage: python3 hades.py new <target> [project-name]     targets: " + ", ".join(toys))
+        name = argv[2] if len(argv) == 3 else argv[1]
+        try:
+            created = make(server.check_name(name), argv[1])
+        except ValueError as e:
+            sys.exit(str(e))
+        sys.exit(0 if created else f"A project named {name} already exists.")
     unknown = [a for i, a in enumerate(argv) if a not in ("--no-open", "--skip-check", "--allow-launch", "--host") and not (i and argv[i - 1] == "--host")]
     if unknown or (argv[-1:] == ["--host"]):
         sys.exit(__doc__.strip())

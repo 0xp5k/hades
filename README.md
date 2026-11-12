@@ -44,7 +44,15 @@ machine fills in from what the verifier measured. Then compare against the answe
     python3 toys/tinyvm/answer_key.py score practice
 
 In our own runs Claude Code agents found all 17 in under six minutes. They have the source, so this is the easy one.
-`toys/blackbox` is the harder target: no source, only a service to send programs to.
+
+Two harder targets are included:
+
+    python3 hades.py new stdlib      # 25 real parsers from Python's standard library; no answer key
+
+- **`stdlib`** is a real target: property lists, tar and zip archives, email, time zone files, TOML and twenty more. A
+  defect is an input that makes a parser fail with an error it should not raise for bad input. Nobody knows how many
+  there are. Plain random input finds 3 in 2.6 million tries, which is the bar for agents to beat.
+- **`toys/blackbox`** has no source to read, only a service to send programs to, and 24 planted defects.
 
 The answer key is in this same folder. The brief tells agents to stay in their working folder, but nothing enforces
 that. For a measurement you care about, move `toys/*/answer_key.py` off the machine first.
@@ -156,7 +164,7 @@ each machine that runs agents. Hades only starts agents if you create `launchers
 | `loop.py` | Runs any harness in rounds; this one file is all an agent machine needs |
 | `emit.py` | Report one event from a shell script |
 | `demo.py`, `demo/` | Demo projects with simulated agents and real scoring |
-| `toys/` | Practice targets with hidden answer keys; `tinyvm` is the `practice` project. **The answer keys are spoilers: keep them away from agents.** |
+| `toys/` | Ready-made targets. `tinyvm` (the `practice` project) and `blackbox` have hidden answer keys; `stdlib` is real code with none. **The answer keys are spoilers: keep them away from agents.** |
 | `projects/` | Your projects' data. Not in version control |
 
 ## Known limits

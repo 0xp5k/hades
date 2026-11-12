@@ -1,0 +1,177 @@
+{
+  "phase": "run",
+  "target": "25 parsers from the Python standard library on this machine, each wrapped by targets.py so that bytes go in and one outcome comes out. Every agent starts with its own copy of targets.py and TARGETS.md.",
+  "goal": "Find every distinct defect in these standard-library parsers: an input of at most 4096 bytes that makes one fail with an error it should not raise for bad input, or run for more than 5 seconds.",
+  "summary": "A real target with no answer key. Agents read the parsers' source, write inputs, try them locally with targets.py, and submit each defect as a run. The verifier replays it and counts each distinct '<target>: <ErrorType> in <function>' once. Plain random input finds 3 in 2.6 million tries; that is the bar to beat.",
+  "rules": "Your working folder holds targets.py and TARGETS.md; read TARGETS.md first. Try an input with:  python3 targets.py <target> <hex>  It prints the defect's label, or what happened instead. The parsers' source is on this machine and you may read it (python3 -c 'import plistlib; print(plistlib.__file__)'), but do not change it, and do not read or change anything else outside your working folder. A parser refusing bad input with its own error class or a ValueError is working as intended. A finding is ONE input: submit {\"target\": \"<name>\", \"hex\": \"<input>\"}. To look for leads cheaply, send a probe: a run marked \"probe\": true with {\"target\": \"<name>\", \"inputs\": [\"<hex>\", ...]} (up to 200); its verdict lists the labels it saw, and it never counts as a result. Before working on a target, check which labels are already confirmed and pick something else. Record what you suspect, confirm or rule out on the Defects board, with the input that shows it and one sentence on the cause.",
+  "metric": {
+    "name": "distinct defects",
+    "direction": "higher",
+    "aggregate": "unique",
+    "artifact": "a finding: {\"target\": \"<name>\", \"hex\": \"<one input>\"}; a probe: {\"target\": \"<name>\", \"inputs\": [\"<hex>\", ...]} with up to 200 inputs"
+  },
+  "sections": [
+    {
+      "id": "targets",
+      "title": "Parsers",
+      "view": "grid",
+      "unit": "inputs tried",
+      "statuses": [
+        "untouched",
+        "probed",
+        "covered"
+      ],
+      "progress": true,
+      "measured": {
+        "probed": 1,
+        "covered": 200
+      }
+    },
+    {
+      "id": "defects",
+      "title": "Defects",
+      "view": "board",
+      "statuses": [
+        "suspected",
+        "confirmed",
+        "rejected"
+      ]
+    },
+    {
+      "id": "round-notes",
+      "title": "Round notes",
+      "view": "note"
+    }
+  ],
+  "seed": [
+    "targets.py",
+    "TARGETS.md"
+  ],
+  "entries": [
+    {
+      "section": "targets",
+      "key": "addresses",
+      "text": "email address lists (email.utils.getaddresses, parseaddr)"
+    },
+    {
+      "section": "targets",
+      "key": "ascii85",
+      "text": "Ascii85 and Base85 decoding"
+    },
+    {
+      "section": "targets",
+      "key": "configparser",
+      "text": "INI files"
+    },
+    {
+      "section": "targets",
+      "key": "cookiejar",
+      "text": "Set-Cookie and date helpers (http.cookiejar)"
+    },
+    {
+      "section": "targets",
+      "key": "cookies",
+      "text": "Cookie headers (http.cookies)"
+    },
+    {
+      "section": "targets",
+      "key": "email",
+      "text": "a whole email message with the modern policy: headers, MIME structure, re-serialising"
+    },
+    {
+      "section": "targets",
+      "key": "fraction",
+      "text": "fractions.Fraction from text"
+    },
+    {
+      "section": "targets",
+      "key": "gettext",
+      "text": "compiled translation catalogs (.mo files)"
+    },
+    {
+      "section": "targets",
+      "key": "htmlparser",
+      "text": "HTML (html.parser)"
+    },
+    {
+      "section": "targets",
+      "key": "httpheaders",
+      "text": "HTTP header blocks (http.client.parse_headers)"
+    },
+    {
+      "section": "targets",
+      "key": "idna",
+      "text": "the idna codec, both directions"
+    },
+    {
+      "section": "targets",
+      "key": "maildate",
+      "text": "email dates (parsedate_to_datetime)"
+    },
+    {
+      "section": "targets",
+      "key": "pickletools",
+      "text": "pickle opcode streams, decoded only (nothing is unpickled)"
+    },
+    {
+      "section": "targets",
+      "key": "plistlib",
+      "text": "Apple property lists, binary and XML"
+    },
+    {
+      "section": "targets",
+      "key": "punycode",
+      "text": "the punycode codec"
+    },
+    {
+      "section": "targets",
+      "key": "regex",
+      "text": "regular expression patterns: compiled only, never run"
+    },
+    {
+      "section": "targets",
+      "key": "shlex",
+      "text": "shell-style splitting"
+    },
+    {
+      "section": "targets",
+      "key": "strptime",
+      "text": "date parsing: the input is '<value>' 0x00 '<format>'"
+    },
+    {
+      "section": "targets",
+      "key": "tarfile",
+      "text": "tar archives: headers are read and members listed, nothing is extracted to disk"
+    },
+    {
+      "section": "targets",
+      "key": "tokenize",
+      "text": "Python source tokens"
+    },
+    {
+      "section": "targets",
+      "key": "tomllib",
+      "text": "TOML documents"
+    },
+    {
+      "section": "targets",
+      "key": "urlparse",
+      "text": "URLs and query strings"
+    },
+    {
+      "section": "targets",
+      "key": "wave",
+      "text": "WAV audio headers and frames"
+    },
+    {
+      "section": "targets",
+      "key": "zipfile",
+      "text": "zip archives, read in memory"
+    },
+    {
+      "section": "targets",
+      "key": "zoneinfo",
+      "text": "compiled time zone files (TZif), pure-Python reader"
+    }
+  ]
+}
