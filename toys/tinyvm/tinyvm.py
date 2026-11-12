@@ -425,7 +425,7 @@ def check(data):
     except Exception as error:
         frames = [f.name for f in traceback.extract_tb(error.__traceback__) if f.filename == __file__ and not f.name.startswith("<")]
         if isinstance(error, RecursionError) and frames:
-            where = max(set(frames), key=frames.count)  # the function that was recursing, not whichever helper hit the limit
+            where = max(sorted(set(frames)), key=frames.count)  # the function that was recursing, not whichever helper hit the limit
         else:
             where = frames[-1] if frames else "check"
         return f"{type(error).__name__} in {where}", seen

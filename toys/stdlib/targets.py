@@ -202,12 +202,13 @@ def t_shlex(data):
 
 def expected():
     """What each parser may raise for bad input without it being a defect. Imports are inside so that listing is cheap."""
-    import configparser, email.errors, http.client, http.cookies, pickle, plistlib, re, tarfile, tokenize, wave, zipfile, zlib
+    import configparser, lzma, email.errors, http.client, http.cookies, pickle, plistlib, re, tarfile, tokenize, wave, zipfile, zlib
     from xml.parsers.expat import ExpatError
     return {
         "plistlib": (plistlib.InvalidFileException, ExpatError),
         "tarfile": (tarfile.TarError, EOFError),
-        "zipfile": (zipfile.BadZipFile, zlib.error, NotImplementedError, RuntimeError, EOFError),
+        # a member's compressed data may be corrupt in any of the three methods; bz2 reports that as OSError
+        "zipfile": (zipfile.BadZipFile, zlib.error, lzma.LZMAError, OSError, NotImplementedError, RuntimeError, EOFError),
         "email": (email.errors.MessageError,),
         "addresses": (),
         "maildate": (),
@@ -262,7 +263,7 @@ def check(target, data):
         return None, f"refused as expected ({type(error).__name__})"
     except RecursionError as error:
         frames = [f.name for f in traceback.extract_tb(error.__traceback__) if os.path.realpath(f.filename).startswith(STDLIB)]
-        where = max(set(frames), key=frames.count) if frames else "?"
+        where = max(sorted(set(frames)), key=frames.count) if frames else "?"  # sorted, so that a tie always names the same function
         return f"{target}: RecursionError in {where}", "defect"
     except Exception as error:
         frames = [f.name for f in traceback.extract_tb(error.__traceback__) if os.path.realpath(f.filename).startswith(STDLIB)]

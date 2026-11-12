@@ -51,7 +51,8 @@ Two harder targets are included:
 
 - **`stdlib`** is a real target: property lists, tar and zip archives, email, time zone files, TOML and twenty more. A
   defect is an input that makes a parser fail with an error it should not raise for bad input. Nobody knows how many
-  there are. Plain random input finds 3 in 2.6 million tries, which is the bar for agents to beat.
+  there are. Plain random input finds 3 in 2.6 million tries, which is the bar for agents to beat. In our own run,
+  three Claude Code (Sonnet) agents confirmed 24 in three short rounds, about five minutes, with no repeats between them.
 - **`toys/blackbox`** has no source to read, only a service to send programs to, and 24 planted defects.
 
 The answer key is in this same folder. The brief tells agents to stay in their working folder, but nothing enforces
@@ -174,5 +175,7 @@ each machine that runs agents. Hades only starts agents if you create `launchers
   network, it will need paging on the server.
 - The verifier scores up to 8 results at once (about 240 a second on the practice project). A scoring command that
   cannot run alongside a copy of itself needs `"workers": 1` under `metric` in its `project.json`.
+- Measured coverage adds up counts the scoring command reports. On the `stdlib` target that is inputs tried, not code
+  reached, so "covered" there is easy to reach and says little.
 - Turn-taking under an agent limit is rough: a waiting agent checks every 15 seconds.
 - Desktop notifications, remote tokens and MCP clients are written but lightly tested.

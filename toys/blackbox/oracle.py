@@ -56,7 +56,7 @@ def run_one(data):
         result = {"outcome": "rejected", "reason": str(error)}
     except Exception as error:
         frames = [f.name for f in traceback.extract_tb(error.__traceback__) if f.filename == FILE and not f.name.startswith("<")]
-        where = max(set(frames), key=frames.count) if isinstance(error, RecursionError) and frames else frames[-1] if frames else "run"
+        where = max(sorted(set(frames)), key=frames.count) if isinstance(error, RecursionError) and frames else frames[-1] if frames else "run"
         signature = f"{type(error).__name__} in {where}"
         result = {"outcome": "failure", "failure": failure_id(signature)}
     finally:
