@@ -11,7 +11,7 @@
     if (t !== "light") t = "dark";  // dark unless the person picked light, or picked "match my system" on a light system
     document.documentElement.dataset.theme = t; })();
 </script>
-<title>Project View</title>
+<title>HAUS</title>
 <style>
   /* Two themes, one set of names. Black, white and true greys only: no hue in any neutral. The only colour on the page
      is green for "good" and red for "wrong", and each of those always comes with a word as well. */
@@ -965,7 +965,7 @@ async function poll() {
       const key = n.project + n.ts + n.text;
       if (S.told.has(key)) continue;
       S.told.add(key);
-      if (!first && S.notify && document.hidden && "Notification" in window && Notification.permission === "granted") new Notification("Project View: " + n.project, { body: n.text });
+      if (!first && S.notify && document.hidden && "Notification" in window && Notification.permission === "granted") new Notification("HAUS: " + n.project, { body: n.text });
     }
     if ($("#drawer").open) renderDrawer();
     if ($("#settings").open && !pressing) renderSettings();

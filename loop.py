@@ -73,7 +73,7 @@ def run_harness(args, brief, timeout):
 
 
 def main():
-    p = argparse.ArgumentParser(description="Run a harness against a Project View project, nonstop.",
+    p = argparse.ArgumentParser(description="Run a harness against a HAUS project, nonstop.",
                                 usage="loop.py PROJECT [options] -- HARNESS COMMAND ...")
     p.add_argument("project")
     p.add_argument("--agent", default=os.environ.get("PROJECT_VIEW_AGENT") or os.uname().nodename, help="this agent's name on the page")

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run Project View with two live demo projects, so there is something real to look at.
+"""Run HAUS with two live demo projects, so there is something real to look at.
 
   python3 demo.py
 

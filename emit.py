@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Report one event to Project View from any harness, on any machine. Needs only Python.
+"""Report one event to HAUS from any harness, on any machine. Needs only Python.
 
   python3 emit.py <project> activity "Training for 5 minutes"
   python3 emit.py <project> run      "Cosine, peak 0.3" --score 0.41 --artifact '{"peak": 0.3}'
@@ -33,7 +33,7 @@ def emit(project, type, text="", **extra):
 
 
 if __name__ == "__main__":
-    p = argparse.ArgumentParser(description="Report one event to Project View.")
+    p = argparse.ArgumentParser(description="Report one event to HAUS.")
     p.add_argument("project")
     p.add_argument("type", choices=["activity", "run", "finding", "question", "item", "task", "tool"])
     p.add_argument("text")

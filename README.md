@@ -1,4 +1,4 @@
-# Project View
+# HAUS
 
 A live page for long-running AI agent work, and the one port every agent reports to.
 
@@ -61,7 +61,7 @@ To take reports from other machines:
     PROJECT_VIEW_TOKEN=<secret> PROJECT_VIEW_VERIFIER_TOKEN=<another> python3 server.py --host 0.0.0.0
 
 Agents then set `PROJECT_VIEW_URL` and `PROJECT_VIEW_TOKEN`. You still need your harness installed and signed in on
-each machine that runs agents; Project View never starts agents itself.
+each machine that runs agents; HAUS never starts agents itself.
 
 ## Trust
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Project View server: the live page, and the one port every harness reports to.
+"""HAUS server: the live page, and the one port every harness reports to.
 
   python3 server.py                  this machine only
   python3 server.py --host 0.0.0.0   reachable from VMs; requires PROJECT_VIEW_TOKEN to be set
@@ -648,7 +648,7 @@ def brief(project, agent, base):
     post = f"curl -s -X POST {base}/api/%s -H 'Content-Type: application/json' -d '%s'"
     who = f'"project": "{project}", "agent": "{agent}"'
 
-    out = [f'You are an agent working on the project "{project}". You report to Project View at {base}.',
+    out = [f'You are an agent working on the project "{project}". You report to HAUS at {base}.',
            f'Your name here is "{agent}". Send it as "agent" in every request.', ""]
     reason = hold(project)
     if reason:
@@ -1042,7 +1042,7 @@ class Handler(BaseHTTPRequestHandler):
 def serve(host="127.0.0.1"):
     if host not in LOCAL and not TOKEN:
         sys.exit("Refusing to listen beyond this machine without a token. Set PROJECT_VIEW_TOKEN first.")
-    print(f"Project View on http://{host}:{PORT}", flush=True)
+    print(f"HAUS on http://{host}:{PORT}", flush=True)
     ThreadingHTTPServer((host, PORT), Handler).serve_forever()
 
 
