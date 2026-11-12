@@ -12,10 +12,42 @@ It needs only Python 3. There is nothing to install.
 
 ## Start it
 
-    python3 demo.py          # the page plus three demo projects with simulated agents, to look around
-    python3 server.py        # the page on its own, for real projects
+    git clone https://github.com/0xp5k/hades && cd hades
+    python3 hades.py
 
-Open http://127.0.0.1:8765.
+That one command checks the install (ten checks, about five seconds, no model needed), starts the page and the verifier
+together, sets up a practice project, and opens http://127.0.0.1:8765.
+
+Or have an assistant do it. Open Claude Code, or any coding agent, in this folder and say:
+
+    Get Hades running for me. Follow "If you are an assistant" in README.md.
+
+Other ways in:
+
+    python3 hades.py check   # only the check; exits 0 if everything works
+    python3 demo.py          # three demo projects with simulated agents, to look around without any model
+    python3 server.py        # the page on its own, when the verifier runs somewhere else
+
+## Try it on the practice project
+
+`python3 hades.py` creates a project called `practice`: a small interpreter with 17 planted defects and a hidden answer
+key, so you can put real agents on it and count what they find. Start an agent whichever way you like:
+
+    sh run-live.sh practice 3        # in another terminal: one Claude Code agent, three rounds
+
+- **From the page:** the gear, then Start agents. This is off until you allow it (`python3 hades.py --allow-launch`).
+- **By talking to Claude:** see "Run it by talking to an agent" below.
+
+Watch the page while it works: results arrive on Runs, the verifier confirms or rejects each one, and the map of the
+machine fills in from what the verifier measured. Then compare against the answer key:
+
+    python3 toys/tinyvm/answer_key.py score practice
+
+In our own runs Claude Code agents found all 17 in under six minutes. They have the source, so this is the easy one.
+`toys/blackbox` is the harder target: no source, only a service to send programs to.
+
+The answer key is in this same folder. The brief tells agents to stay in their working folder, but nothing enforces
+that. For a measurement you care about, move `toys/*/answer_key.py` off the machine first.
 
 ## Start a real project
 
@@ -25,8 +57,10 @@ Open http://127.0.0.1:8765.
 3. Read the proposal, including the whole scoring script, then approve it or send it back with comments.
 4. Start agents. Each round they get a fresh brief: the routine to follow plus where things stand right now.
 
-    python3 verifier.py                                   # re-scores every result; keep it where agents cannot write
     python3 loop.py my-project --agent a-1 -- claude -p   # everything after -- is your own harness command
+
+`python3 hades.py` already runs the verifier. If you started `server.py` on its own, run `python3 verifier.py` too, and
+keep it where agents cannot write.
 
 `loop.py` works with any harness that takes a prompt on standard input or as a file (`{brief_file}`).
 `run-live.sh` is a ready-made wrapper for Claude Code; `check-harness.sh` tries Codex or OhMyPi for one round.
@@ -44,9 +78,23 @@ settings and tell you what needs you. To have the same abilities built in as too
 
 The coordinator cannot approve a setup proposal or answer agents' questions for you. Those stay with you, on the page.
 
+## If you are an assistant
+
+A person has asked you to get Hades running on this machine. Do this, in order:
+
+1. Run `python3 hades.py check`. If any line says FAIL, stop and show the person that output.
+2. Ask the person one question: may the page, and you, start agents on this machine? Saying yes lets the server run the
+   agent command in `launchers.example.json`, and nothing else.
+3. Start the server in the background, because it does not exit: `python3 hades.py --skip-check --no-open`, adding
+   `--allow-launch` only if they said yes.
+4. Read `http://127.0.0.1:8765/api/coordinator` and follow it. It lists your tools and the rules.
+5. Tell the person to open http://127.0.0.1:8765, and offer to start one agent on the `practice` project. Starting
+   agents spends their model usage, so say how many agents and rounds, and wait for a yes.
+
 ## Starting agents from the server
 
-Off by default. Copy `launchers.example.json` to `launchers.json` and edit the command for your harness. Each entry is a
+Off by default. `python3 hades.py --allow-launch` switches it on for Claude Code; or copy `launchers.example.json` to
+`launchers.json` yourself and edit the command for your harness. Each entry is a
 named recipe; Settings and the coordinator can start and stop those recipes and nothing else. Launched agents work in
 `agent-work/<project>/<agent>/`, where `loop.log` holds each one's output. A project can name a folder (`agent_files`)
 that every new agent starts with a copy of.
@@ -79,7 +127,7 @@ The Connect page in the app has copy-and-paste examples filled in with your serv
 
 ## Running in a VM
 
-Copy this folder in and run `python3 server.py`. Agents on the same machine reach it at `127.0.0.1:8765` with no token.
+Copy this folder in and run `python3 hades.py --no-open`. Agents on the same machine reach it at `127.0.0.1:8765` with no token.
 
 To take reports from other machines:
 
@@ -101,13 +149,14 @@ each machine that runs agents. Hades only starts agents if you create `launchers
 
 | File | What it is |
 |---|---|
+| `hades.py` | The front door: checks the install, then runs the server and the verifier together |
 | `server.py` | The server: storage, briefs, tasks, slots, setup and approval |
 | `index.html` | The whole page |
 | `verifier.py` | Re-scores results with each project's scoring command |
 | `loop.py` | Runs any harness in rounds; this one file is all an agent machine needs |
 | `emit.py` | Report one event from a shell script |
 | `demo.py`, `demo/` | Demo projects with simulated agents and real scoring |
-| `toys/` | Practice targets with hidden answer keys. **The answer keys are spoilers: keep them away from agents.** |
+| `toys/` | Practice targets with hidden answer keys; `tinyvm` is the `practice` project. **The answer keys are spoilers: keep them away from agents.** |
 | `projects/` | Your projects' data. Not in version control |
 
 ## Known limits

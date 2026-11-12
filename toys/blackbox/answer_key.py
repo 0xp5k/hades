@@ -10,6 +10,7 @@ Two groups:
   hidden       nothing in the spec points to it: an undocumented instruction, constant type or mode
 """
 import json
+import os
 import random
 import sys
 import urllib.request
@@ -178,7 +179,8 @@ def baseline(tries=200000, seed=0):
     return found
 
 
-def score(project, url="http://127.0.0.1:8765"):
+def score(project, url=None):
+    url = (url or os.environ.get("PROJECT_VIEW_URL", "http://127.0.0.1:8765")).rstrip("/")
     events = json.loads(urllib.request.urlopen(f"{url}/api/events?project={project}").read())["events"]
     runs = {e.get("id"): e for e in events if e["type"] == "run"}
     confirmed = {e.get("text") for e in events if e["type"] == "verdict" and e.get("ok") and not runs.get(e.get("run"), {}).get("probe")}
