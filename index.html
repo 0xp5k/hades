@@ -21,14 +21,14 @@
     --inset: rgba(0,0,0,.42); --overlay: rgba(16,16,16,.78);
     --fg: #ffffff; --muted: #a8a8a8; --faint: #787878; --ink: #000000; --thumb: rgba(255,255,255,.2);
     --ok: #6fd69f; --info: #d6d6d6; --bad: #ff7a7a;
-    --r-lg: 14px; --r-md: 9px; --blur: blur(18px) saturate(115%);
+    --r-lg: 14px; --r-md: 9px; --blur: blur(18px) saturate(115%); color-scheme: dark;
   }
   :root[data-theme="light"] {
     --bg: #ffffff; --glass: rgba(255,255,255,.62); --glass-2: rgba(255,255,255,.5); --card: rgba(0,0,0,.045); --card-2: rgba(0,0,0,.11); --solid: #f2f2f2;
     --hair: rgba(0,0,0,.15); --hair-2: rgba(0,0,0,.36); --shine: rgba(255,255,255,.9); --tick: rgba(0,0,0,.16); --fog: rgba(0,0,0,.1);
     --inset: rgba(0,0,0,.055); --overlay: rgba(255,255,255,.82);
     --fg: #000000; --muted: #4f4f4f; --faint: #767676; --ink: #ffffff; --thumb: rgba(0,0,0,.24);
-    --ok: #0f7a47; --info: #2b2b2b; --bad: #c21f1f;
+    --ok: #0f7a47; --info: #2b2b2b; --bad: #c21f1f; color-scheme: light;
   }
   * { box-sizing: border-box; }
   html, body { height: 100%; }
@@ -45,7 +45,8 @@
   ::-webkit-scrollbar-thumb { background: var(--thumb); border-radius: 9px; border: 2px solid transparent; background-clip: padding-box; }
   ::-webkit-scrollbar-corner { background: transparent; }
   :focus-visible { outline: 2px solid var(--fg); outline-offset: 2px; }
-  button, input, select { font: inherit; color: inherit; }
+  button, input, select, textarea { font: inherit; color: inherit; }
+  textarea, input { caret-color: var(--fg); }
   a { color: inherit; }
 
   /* ---- rail ---- */
@@ -176,7 +177,7 @@
   dialog .row { justify-content: flex-end; margin-top: 12px; }
   #toast { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); background: var(--overlay); border-radius: var(--r-md); padding: 10px 16px; z-index: 5; max-width: calc(100vw - 32px); }
   #settings > .row, #drawer > .row { justify-content: space-between; margin-top: 0; }
-  #bell, #gear { display: inline-flex; align-items: center; gap: 6px; padding: 9px 12px; }
+  #bell, #gear, #theme { display: inline-flex; align-items: center; gap: 6px; padding: 9px 12px; }
   #settings h3 { font-size: 13px; font-weight: 600; margin: 22px 0 10px; padding-top: 16px; border-top: 1px solid var(--hair); }
   #settings h3:first-child { border-top: 0; margin-top: 8px; padding-top: 0; }
   .count { background: var(--bad); color: var(--ink); font-size: 12px; font-weight: 700; border-radius: 99px; padding: 0 7px; line-height: 1.6; }
@@ -207,7 +208,8 @@
     <span class="grow"></span>
     <span class="pill bad" id="conn" role="status" hidden>Reconnecting…</span>
     <button class="btn quiet" id="bell" aria-label="Notifications" title="What was found, and what needs you"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 16V11a6 6 0 0 1 12 0v5l1.500 2h-15zM10 20a2 2 0 0 0 4 0"/></svg><span id="bell-n" class="count" hidden></span></button>
-    <button class="btn quiet" id="gear" aria-label="Settings" title="Settings"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M12 3v3M12 18v3M3 12h3M18 12h3M5.600 5.600l2.100 2.100M16.300 16.300l2.100 2.100M5.600 18.400l2.100-2.100M16.300 7.700l2.100-2.100"/></svg></button>
+    <button class="btn quiet" id="theme" aria-label="Switch between dark and light" title="Switch between dark and light"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8.5"/><path d="M12 3.5a8.5 8.5 0 0 0 0 17z" fill="currentColor"/></svg></button>
+    <button class="btn quiet" id="gear" aria-label="Settings" title="Settings"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h9M17 7h3M4 12h3M11 12h9M4 17h11M19 17h1"/><circle cx="15" cy="7" r="2"/><circle cx="9" cy="12" r="2"/><circle cx="17" cy="17" r="2"/></svg></button>
     <button class="btn quiet" id="pause" hidden>Pause agents</button>
     <button class="btn" id="new" hidden>+ New task</button>
   </div>
@@ -1071,6 +1073,7 @@ function applyTheme(choice) {
   document.documentElement.dataset.theme = choice === "light" || choice === "dark" ? choice : matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
 }
 matchMedia("(prefers-color-scheme: light)").addEventListener("change", () => { if (store.get("pv-theme", "dark") === "system") applyTheme("system"); });
+$("#theme").addEventListener("click", () => { applyTheme(document.documentElement.dataset.theme === "dark" ? "light" : "dark"); if ($("#settings").open) renderSettings(); });
 $("#gear").addEventListener("click", () => { renderSettings(); $("#settings").showModal(); $("#settings-close").focus(); });
 $("#settings-close").addEventListener("click", () => $("#settings").close());
 $("#settings").addEventListener("click", async e => {
