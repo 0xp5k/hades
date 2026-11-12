@@ -12,7 +12,7 @@
     document.documentElement.dataset.theme = t; })();
 </script>
 <title>Hades</title>
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect width='24' height='24' rx='5' fill='%23000'/%3E%3Cg fill='%23fff'%3E%3Crect x='4.45' y='3' width='4.7' height='18'/%3E%3Crect x='14.85' y='3' width='4.7' height='18'/%3E%3Cpath d='M10.6 7.1l2.8 4.4v5.3l-2.8-4.2z'/%3E%3C/g%3E%3C/svg%3E">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='2 2 20 20'%3E%3Cstyle%3Eg{fill:%23000}@media (prefers-color-scheme:dark){g{fill:%23fff}}%3C/style%3E%3Cg%3E%3Crect x='4.45' y='3' width='4.7' height='18'/%3E%3Crect x='14.85' y='3' width='4.7' height='18'/%3E%3Cpath d='M10.6 7.1l2.8 4.4v5.3l-2.8-4.2z'/%3E%3C/g%3E%3C/svg%3E">
 <style>
   /* Two themes, one set of names. Black, white and true greys only: no hue in any neutral. The only colour on the page
      is green for "good" and red for "wrong", and each of those always comes with a word as well. */
@@ -54,7 +54,8 @@
   .rail { background: var(--glass-2); border-width: 0 1px 0 0; display: flex; flex-direction: column; align-items: center; gap: 4px;
     padding: 18px 0 14px; height: 100vh; height: 100dvh; overflow-y: auto; scrollbar-width: none; }
   .rail::-webkit-scrollbar { display: none; }
-  .logo { width: 44px; height: 44px; border-radius: var(--r-lg); background: var(--fg); color: var(--ink); display: grid; place-items: center; margin-bottom: 14px; flex: none; }
+  .logo { width: 44px; height: 44px; color: var(--fg); display: grid; place-items: center; margin-bottom: 14px; flex: none; }
+  .logo svg { width: 34px; height: 34px; }
   .rail a { width: 68px; padding: 8px 2px 6px; border-radius: var(--r-md); display: flex; flex-direction: column; align-items: center; gap: 4px;
     color: var(--faint); text-decoration: none; font-size: 10.5px; line-height: 1.2; flex: none; transition: color .12s, background .12s; }
   .rail a span { max-width: 64px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
