@@ -1,4 +1,6 @@
-# HAUS
+<img src="logo.svg" width="72" alt="Hades logo">
+
+# Hades
 
 A live page for long-running AI agent work, and the one port every agent reports to.
 
@@ -33,12 +35,12 @@ Open http://127.0.0.1:8765.
 
 Nothing to install. Open Claude Code on the same machine and say:
 
-    Read http://127.0.0.1:8765/api/coordinator and act as my coordinator for HAUS.
+    Read http://127.0.0.1:8765/api/coordinator and act as my coordinator for Hades.
 
 It reads a short guide from the server and can then create projects, start and stop agents, queue tasks, change run
 settings and tell you what needs you. To have the same abilities built in as tools instead:
 
-    claude mcp add --transport http haus http://127.0.0.1:8765/mcp
+    claude mcp add --transport http hades http://127.0.0.1:8765/mcp
 
 The coordinator cannot approve a setup proposal or answer agents' questions for you. Those stay with you, on the page.
 
@@ -84,7 +86,7 @@ To take reports from other machines:
     PROJECT_VIEW_TOKEN=<secret> PROJECT_VIEW_VERIFIER_TOKEN=<another> python3 server.py --host 0.0.0.0
 
 Agents then set `PROJECT_VIEW_URL` and `PROJECT_VIEW_TOKEN`. You still need your harness installed and signed in on
-each machine that runs agents. HAUS only starts agents if you create `launchers.json`.
+each machine that runs agents. Hades only starts agents if you create `launchers.json`.
 
 ## Trust
 

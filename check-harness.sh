@@ -4,7 +4,7 @@
 #   sh check-harness.sh omp       OhMyPi
 # The agent is asked only to report which harness and model it is, on the "harness-check" project. It works in an empty
 # folder of its own. Codex runs in its workspace-write sandbox with network access switched on, because it has to reach
-# the HAUS server on this machine; nothing else about its sandbox is relaxed.
+# the Hades server on this machine; nothing else about its sandbox is relaxed.
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 WORK="${TMPDIR:-/tmp}/project-view-check-$1"
 mkdir -p "$WORK" && cd "$WORK" || exit 1

@@ -11,8 +11,8 @@
     if (t !== "light") t = "dark";  // dark unless the person picked light, or picked "match my system" on a light system
     document.documentElement.dataset.theme = t; })();
 </script>
-<title>HAUS</title>
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect width='24' height='24' rx='5' fill='%23000'/%3E%3Cpath d='M7.500 5v14M16.500 5v14' stroke='%23fff' stroke-width='3'/%3E%3Cpath d='M7.500 12h9' stroke='%23fff' stroke-width='1.200'/%3E%3C/svg%3E">
+<title>Hades</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect width='24' height='24' rx='5' fill='%23000'/%3E%3Cg fill='%23fff'%3E%3Crect x='4.45' y='3' width='4.7' height='18'/%3E%3Crect x='14.85' y='3' width='4.7' height='18'/%3E%3Cpath d='M10.6 7.1l2.8 4.4v5.3l-2.8-4.2z'/%3E%3C/g%3E%3C/svg%3E">
 <style>
   /* Two themes, one set of names. Black, white and true greys only: no hue in any neutral. The only colour on the page
      is green for "good" and red for "wrong", and each of those always comes with a word as well. */
@@ -306,8 +306,8 @@ const ICONS = {
   stats: '<path d="M5 19v-8M12 19V5M19 19v-5" stroke-width="2.6"/>',
   mark: '<path d="M12 3l8 9-8 9-8-9z"/>',
 };
-const LOGO = `<svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true" fill="none" stroke="currentColor" stroke-linecap="butt">
-  <path d="M7 3.5v17M17 3.5v17" stroke-width="3.4"/><path d="M7 12h10" stroke-width="1.3"/></svg>`;
+// The mark: two solid uprights with a slanted shard hanging between them, touching neither.
+const LOGO = `<svg viewBox="0 0 24 24" width="24" height="24" aria-hidden="true" fill="currentColor"><rect x="4.45" y="3" width="4.7" height="18"/><rect x="14.85" y="3" width="4.7" height="18"/><path d="M10.6 7.1l2.8 4.4v5.3l-2.8-4.2z"/></svg>`;
 const icon = name => `<svg class="i" viewBox="0 0 24 24" aria-hidden="true">${ICONS[name] || ICONS.dot}</svg>`;
 
 /* ---------- routing ---------- */
@@ -847,9 +847,9 @@ const views = {
     const block = (key, title, why, code) => `<div class="box glass"><div class="row"><h2>${title}</h2><button class="btn small ghost" data-copy="${key}" data-fk="copy:${key}">Copy</button></div>
       <div class="sub">${why}</div><pre id="copy-${key}">${esc(code)}</pre></div>`;
     return block("talk", "Run it by talking to Claude", "Nothing to install. Open Claude Code anywhere on this machine and paste this. It reads a short guide from the server and can then create projects, start and stop agents, queue tasks and tell you what needs you. It cannot approve a setup proposal or answer agents for you.",
-`Read ${o}/api/coordinator and act as my coordinator for HAUS. Start by telling me where my projects stand.`)
+`Read ${o}/api/coordinator and act as my coordinator for Hades. Start by telling me where my projects stand.`)
     + block("talk-mcp", "Or connect it once, as tools", "One command, then the same abilities are built in to every Claude Code session on this machine.",
-`claude mcp add --transport http haus ${o}/mcp`)
+`claude mcp add --transport http hades ${o}/mcp`)
     + block("loop", "Run an agent nonstop", "Copy loop.py to the machine. It starts your harness fresh each round with this project's brief: the routine to follow plus where things stand right now. Everything after -- is your own harness command.",
 `export PROJECT_VIEW_URL=${o}
 python3 loop.py ${id} --agent vm-1/my-harness -- claude -p
@@ -922,7 +922,7 @@ function render(force) {
   sel.hidden = S.projects.length < 2;
   if (p && sel.value !== p.id) sel.value = p.id;
 
-  const rail = `<div class="logo" title="HAUS" aria-label="HAUS">${LOGO}</div>` + list.map(x =>
+  const rail = `<div class="logo" title="Hades" aria-label="Hades">${LOGO}</div>` + list.map(x =>
     `<a href="${href(p.id, x.id)}" class="${x === page ? "on" : ""}${x.push ? " push" : ""}" title="${esc(x.title)}" data-fk="nav:${esc(x.id)}" ${x === page ? 'aria-current="page"' : ""}>${icon(x.icon)}<span>${esc(x.title)}</span></a>`).join("");
   const fk = document.activeElement && document.activeElement.dataset ? document.activeElement.dataset.fk : null;
   if (rail !== lastRail) { lastRail = rail; $("#rail").innerHTML = rail; }
@@ -977,7 +977,7 @@ async function poll() {
       const key = n.project + n.ts + n.text;
       if (S.told.has(key)) continue;
       S.told.add(key);
-      if (!first && S.notify && document.hidden && "Notification" in window && Notification.permission === "granted") new Notification("HAUS: " + n.project, { body: n.text });
+      if (!first && S.notify && document.hidden && "Notification" in window && Notification.permission === "granted") new Notification("Hades: " + n.project, { body: n.text });
     }
     if ($("#drawer").open) renderDrawer();
     if ($("#settings").open && !pressing) renderSettings();

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""HAUS server: the live page, and the one port every harness reports to.
+"""Hades server: the live page, and the one port every harness reports to.
 
   python3 server.py                  this machine only
   python3 server.py --host 0.0.0.0   reachable from VMs; requires PROJECT_VIEW_TOKEN to be set
@@ -777,7 +777,7 @@ def brief(project, agent, base):
     post = f"curl -s -X POST {base}/api/%s -H 'Content-Type: application/json' -d '%s'"
     who = f'"project": "{project}", "agent": "{agent}"'
 
-    out = [f'You are an agent working on the project "{project}". You report to HAUS at {base}.',
+    out = [f'You are an agent working on the project "{project}". You report to Hades at {base}.',
            f'Your name here is "{agent}". Send it as "agent" in every request.', ""]
     reason = hold(project)
     if reason:
@@ -1003,7 +1003,7 @@ def brief(project, agent, base):
 
 WHO = {"project": {"type": "string"}, "agent": {"type": "string", "description": "Who is calling, e.g. vm-2/codex"}, "harness": {"type": "string"}}
 MCP_TOOLS = [
-    {"name": "report", "description": "Report to the project view. Types: activity (what you are doing now), run (an attempt, with the artifact the "
+    {"name": "report", "description": "Report to Hades. Types: activity (what you are doing now), run (an attempt, with the artifact the "
      "verifier needs to re-score it), finding, question (ask the person, or answer one of theirs), item (an entry in one of the project's sections), "
      "task (create or update), tool (one tool call), topic (an entry on the Understanding page: key is its title, body the explanation), "
      "proposal (a survey agent's proposed setup).",
@@ -1037,7 +1037,7 @@ MCP_TOOLS = [
 
 P = {"project": {"type": "string"}}
 COORDINATOR_TOOLS = [
-    {"name": "list_projects", "description": "Every project on this HAUS server with its phase, goal and whether it is on hold. Start here.",
+    {"name": "list_projects", "description": "Every project on this Hades server with its phase, goal and whether it is on hold. Start here.",
      "inputSchema": {"type": "object", "properties": {}}},
     {"name": "project_status", "description": "Where one project stands: confirmed results, tasks, live agents, what needs the person, open questions, latest findings.",
      "inputSchema": {"type": "object", "required": ["project"], "properties": P}},
@@ -1109,7 +1109,7 @@ def coordinator_guide(base):
     """Everything a chat agent needs to run this server for the person, with nothing to install: it only needs to make HTTP
     requests. The person says "read <this address> and help me with my projects"."""
     call = f"curl -s -X POST {base}/api/coordinate -H 'Content-Type: application/json' -d"
-    out = [f"You are the person's coordinator for HAUS, a server at {base} that runs and tracks AI agent research projects.",
+    out = [f"You are the person's coordinator for Hades, a server at {base} that runs and tracks AI agent research projects.",
            f"The person watches everything on the page at {base} ; you act for them by calling the tools below.",
            "",
            "HOW TO CALL A TOOL",
@@ -1146,7 +1146,7 @@ def mcp(msg, ip, verifier, base="", coordinator=False):
         return None
     if method == "initialize":
         result = {"protocolVersion": params.get("protocolVersion", "2025-03-26"), "capabilities": {"tools": {}},
-                  "serverInfo": {"name": "haus", "version": "0.3"}}
+                  "serverInfo": {"name": "hades", "version": "0.3"}}
     elif method == "ping":
         result = {}
     elif method == "tools/list":
@@ -1294,7 +1294,7 @@ class Handler(BaseHTTPRequestHandler):
 def serve(host="127.0.0.1"):
     if host not in LOCAL and not TOKEN:
         sys.exit("Refusing to listen beyond this machine without a token. Set PROJECT_VIEW_TOKEN first.")
-    print(f"HAUS on http://{host}:{PORT}", flush=True)
+    print(f"Hades on http://{host}:{PORT}", flush=True)
     ThreadingHTTPServer((host, PORT), Handler).serve_forever()
 
 
