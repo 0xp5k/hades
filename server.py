@@ -538,11 +538,26 @@ def launched(project=None):
             if not alive:
                 r.setdefault("ended", now)
                 if now - r["ended"] > 600:
+                    r["console"].close()
                     del RUNNING[key]
                     continue
             if project in (None, key[0]):
-                out.append({"project": key[0], "agent": key[1], "recipe": r["recipe"], "alive": alive, "started": r["started"]})
+                out.append({"project": key[0], "agent": key[1], "recipe": r["recipe"], "alive": alive, "started": r["started"], "session": r["session"]})
     return out
+
+
+def console_tail(project, agent, session):
+    """Read only a launcher-held descriptor and only bytes from this launch."""
+    with LOCK:
+        record = RUNNING.get((project, agent))
+        if not record or record["session"] != session:
+            return None
+        stream = record["console"]
+        end = stream.seek(0, os.SEEK_END)
+        start = max(record["start_offset"], end - 65536)
+        stream.seek(start)
+        data = stream.read(max(0, end - start))
+        return {"text": data.decode("utf-8", errors="replace"), "clipped": start > record["start_offset"]}
 
 
 def launch(data):
@@ -580,9 +595,24 @@ def launch(data):
             env["PROJECT_VIEW_URL"] = f"http://127.0.0.1:{PORT}"
             command = [sys.executable, str(ROOT / "scripts" / "loop.py"), project, "--agent", agent, "--harness", str(recipe.get("label") or name),
                        "--max-iterations", str(rounds), "--timeout-min", str(recipe.get("timeout_min", 10)), "--"] + recipe["command"]
-            log = open(work / "loop.log", "a")
-            proc = subprocess.Popen(command, cwd=work, env=env, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
-            RUNNING[(project, agent)] = {"proc": proc, "recipe": name, "started": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")}
+            session = uuid.uuid4().hex
+            env["HADES_LAUNCH_SESSION"] = session
+            with open(work / "loop.log", "ab") as log:
+                console = open(work / "loop.log", "rb")
+                try:
+                    if not os.path.samestat(os.fstat(log.fileno()), os.fstat(console.fileno())):
+                        raise OSError("terminal log changed while opening it")
+                    start_offset = console.seek(0, os.SEEK_END)
+                    proc = subprocess.Popen(command, cwd=work, env=env, stdin=subprocess.DEVNULL, stdout=log,
+                                            stderr=subprocess.STDOUT, start_new_session=True)
+                except BaseException:
+                    console.close()
+                    raise
+            previous = RUNNING.get((project, agent))
+            if previous:
+                previous["console"].close()
+            RUNNING[(project, agent)] = {"proc": proc, "recipe": name, "session": session, "console": console,
+                                         "start_offset": start_offset, "started": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")}
             started.append(agent)
     return {"started": started, "rounds": rounds, "recipe": name}
 
@@ -792,8 +822,7 @@ def survey_brief(cfg, events, post, who, known, writing, person):
     if waiting_one and not tasks and not any(l.startswith("THE PERSON ASKED") for l in person):
         return out + ["", f'YOUR PROPOSAL "{waiting_one.get("text", "")}" IS WAITING FOR THE PERSON TO REVIEW. There is nothing to do until they respond. Stop now.']
     out += ["", "WHAT TO DO, IN ORDER",
-            "1. Say what you are doing as you go, one short line each time it changes.",
-            "   " + post % ("events", "{" + who + ', "type": "activity", "text": "..."}'),
+            "1. Work in your terminal. The dashboard reads its output directly for local launches.",
             "2. Study the target until you could explain it to someone else.",
             "3. Write the Understanding page. Cover at least: what this is and what it is for; how it works, step by step; its parts,",
             "   one line each; where problems are most likely and why; and the words a newcomer needs, each defined.",
@@ -999,8 +1028,7 @@ def brief(project, agent, base):
             "   a task for it (second command; the reply contains its id).",
             "   " + post % ("claim", "{" + who + "}"),
             "   " + post % ("events", "{" + who + ', "type": "task", "text": "<what you will do>", "status": "running"}'),
-            "2. Before each distinct piece of work, post one short line saying what you are about to do.",
-            "   " + post % ("events", "{" + who + ', "type": "activity", "text": "..."}'),
+            "2. Use your terminal normally. The final response is saved as the round handoff.",
             "3. Report each attempt worth scoring as a run. The reply contains its id.",
             "   " + post % ("events", "{" + who + ', "type": "run", "text": "<one-line description>", "score": <your number, optional>, "artifact": <see above>}'),
             "4. After reporting runs, wait a few seconds and read what the verifier decided about them.",
@@ -1047,7 +1075,6 @@ def brief(project, agent, base):
     out += ["(none yet)"] if not sections else []
     out += ["", "BEFORE YOU STOP, every one of these must be true:",
             "[ ] You took or created a task at the start, and you have now closed it.",
-            "[ ] You posted an activity line for each piece of work you did.",
             "[ ] Every result you stand behind was reported as a run, and you read the verifier's decision on it.",
             *[f'[ ] You sent probes aimed at the entries of {s.get("title", s["id"])} that are still low.' if s.get("measured")
               else f'[ ] The {s.get("title", s["id"])} page reflects what you now know.' for s in sections],
@@ -1325,6 +1352,12 @@ class Handler(BaseHTTPRequestHandler):
                 # epoch changes on every server start, so an open page knows to refetch instead of mixing two logs
                 self.reply(200, [{"id": p, "config": public_config(p), "count": len(load(p)), "epoch": BOOT, "experimentChecks": experiment_checks(p), "hold": hold(p), "notable": notable(p), "working": sorted(a for a, t in SLOTS.get(p, {}).items() if t > time.time()),
                                   "launched": launched(p), "recipes": {k: v.get("label", k) for k, v in recipes().items()}} for p in project_ids()])
+            elif url.path == "/api/terminal":
+                host = urlparse(self.base()).hostname
+                if self.client_address[0] not in LOCAL or host not in (*LOCAL, "localhost"):
+                    return self.reply(403, {"error": "Terminal output is available on localhost."})
+                tail = console_tail(arg("project"), arg("agent"), arg("session"))
+                self.reply(200 if tail is not None else 404, tail or {"error": "No attached terminal."})
             elif url.path == "/api/events":
                 events, after = load(check_name(arg("project"))), max(0, int(arg("after") or 0))
                 self.reply(200, {"events": events[after:after + 5000]})

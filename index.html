@@ -217,6 +217,8 @@
   .evidence-entry { overflow-wrap: anywhere; }
   .evidence-entry summary { cursor: pointer; }
   .loop-console { background: var(--inset); border: 1px solid var(--hair); border-radius: var(--r-lg); padding: 14px 16px; }
+  .loop-console { margin-block: 12px; }
+  .loop-console pre { white-space: pre-wrap; overflow-wrap: anywhere; }
   .loop-console summary { cursor: pointer; }
   .loop-work { padding: clamp(16px, 3vw, 26px); margin-bottom: 16px; border: 1px solid var(--hair); border-radius: var(--r-lg); background: var(--glass); overflow-wrap: anywhere; }
   .loop-work header p { margin: 0 0 6px; }
@@ -801,6 +803,65 @@ function overnightReview(p) {
 
 const pinnedRounds = new Map();
 
+// Terminal output stays in this browser tab. It never enters the project event log.
+const attachedLogs = new Map();
+let terminalView = { key: "", text: "", info: "" };
+
+function terminalPanel(p, round) {
+  const pinned = pinnedRounds.has(p.id);
+  const launches = p.launched || [];
+  let launch = launches.find(x => x.session && x.session === round?.session);
+  if (!pinned && !launch?.alive) launch = [...launches].reverse().find(x => x.alive && x.session) || launch;
+  const file = pinned ? null : attachedLogs.get(p.id);
+  const choose = window.showOpenFilePicker && !pinned ? '<button class="btn small ghost" data-attach-log>Follow a log file</button>' : "";
+  if (!file && !launch) return choose ? `<div class="brief-tools">${choose}</div>` : "";
+  const key = JSON.stringify([p.id, file ? file.id : launch.session]);
+  const cached = terminalView.key === key ? terminalView : {};
+  return `<section class="loop-console" data-console-key="${esc(key)}" data-project="${esc(p.id)}" data-agent="${esc(launch?.agent || "")}" data-session="${esc(launch?.session || "")}" data-file="${file ? "1" : ""}">
+    <div class="row"><h2>Terminal · ${esc(file ? file.handle.name : launch.agent)}</h2>
+    ${file ? '<button class="btn small ghost" data-detach-log>Detach</button>' : ""}</div>
+    <div class="sub" data-console-info>${esc(cached.info || "Connecting…")}</div>
+    <pre class="loop-output" data-console-text data-keep="${esc("terminal:" + key)}" data-tail tabindex="0" aria-label="Terminal output">${esc(cached.text || "")}</pre></section>`;
+}
+
+// Refresh independently from project updates, including while no model events arrive.
+async function refreshTerminal() {
+  const panel = document.querySelector("[data-console-key]");
+  try {
+    if (!panel) return;
+    const { consoleKey: key, project, agent, session, file } = panel.dataset;
+    let text, clipped;
+    if (file) {
+      const selected = attachedLogs.get(project);
+      if (!selected) return;
+      const log = await selected.handle.getFile();
+      clipped = log.size > 65536;
+      text = await log.slice(Math.max(0, log.size - 65536)).text();
+    } else {
+      const params = new URLSearchParams({project, agent, session});
+      const res = await fetch("/api/terminal?" + params, {cache: "no-store"});
+      if (!res.ok) throw Error(res.status === 403 ? "Open Hades on localhost to view this terminal." : "Terminal unavailable.");
+      ({text, clipped} = await res.json());
+    }
+    if (!panel.isConnected) return;
+    // Normalize console styling and carriage-return progress lines without interpreting markup.
+    text = text.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "").replace(/\r\n/g, "\n").replace(/[^\n\r]*\r/g, "");
+    const info = clipped ? "Showing the latest 64 KiB" : text ? "Captured output" : "Waiting for terminal output…";
+    const pre = panel.querySelector("[data-console-text]");
+    if (pre.textContent !== text) {
+      const tail = pre.scrollHeight - pre.scrollTop - pre.clientHeight < 5;
+      pre.textContent = text;
+      if (tail) pre.scrollTop = pre.scrollHeight;
+    }
+    panel.querySelector("[data-console-info]").textContent = info;
+    terminalView = { key, text, info };
+  } catch (error) {
+    if (panel?.isConnected) panel.querySelector("[data-console-info]").textContent = error.message || "Terminal unavailable.";
+  } finally {
+    setTimeout(refreshTerminal, document.hidden ? 2000 : 500);
+  }
+}
+
 function publicLoopUpdate(e) {
   const data = e.data || {};
   const refs = [data.evidence, ...(Array.isArray(e.evidence) ? e.evidence.map(ref => ref.ref) : [])]
@@ -844,7 +905,7 @@ function readLoop(events) {
     if (marker && (marker[2] === "started" || !round || round.number !== marker[1])) {
       const open = agents.get(e.agent) || new Set();
       if (round) { round.open = false; open.delete(round); }
-      round = { key: index, number: marker[1], agent: e.agent, harness: e.harness, ts: e.ts, state: "", open: true, lines: [], updates: [] };
+      round = { key: index, number: marker[1], agent: e.agent, session, harness: e.harness, ts: e.ts, state: "", open: true, lines: [], updates: [] };
       sessions.set(id, round);
       open.add(round);
       agents.set(e.agent, open);
@@ -859,6 +920,10 @@ function readLoop(events) {
     }
     if (note) {
       round.hasOutput = true;
+      const output = e.body || e.text || "";
+      const marker = [...output.matchAll(/^(?:\*\*)?Handoff:(?:\*\*)?\s*/gim)].pop();
+      round.handoff = marker ? output.slice(marker.index + marker[0].length).trim() : output;
+      round.hasHandoff = !!marker;
       if (/^API Error:/i.test(e.body || "")) round.apiError = true;
     }
     if (marker?.[2]?.startsWith("finished")) round.state = "Finished";
@@ -878,7 +943,7 @@ function liveLoop(p) {
   const state = !S.connected ? "Disconnected · showing saved events" : workers.size ? plural(workers.size, "active worker") :
     p.hold ? cap(p.hold) : "No active worker reported";
   const heading = `<p class="brief-state">${esc(state)}</p>`;
-  if (!rounds.length) return heading + bare(lastStop ? lastStop.text : "Waiting for the first iteration to be reported.");
+  if (!rounds.length) return heading + terminalPanel(p, null) + bare(lastStop ? lastStop.text : "No iterations recorded yet.");
   const status = r => r.state || (r.hasOutput ? "Output saved" :
     r.open && S.connected && (p.working || []).includes(r.agent) ? "Running" : "Start reported");
   const visible = rounds.filter(r => hit(r.agent, r.harness, "Iteration " + r.number, status(r)) ||
@@ -908,13 +973,14 @@ function liveLoop(p) {
     <div>${esc(u.title)}</div>${u.detail && u.detail !== u.title ? `<p>${esc(u.detail)}</p>` : ""}
     ${u !== focus && facts(u) ? `<dl class="kv">${facts(u)}</dl>` : ""}</div></li>`;
   const logKey = `loop-log:${p.id}:${round.key}`;
-  return heading + `<article class="loop-work"><header><p class="sub">${esc(round.agent)} · Iteration ${esc(round.number)} · ${esc(status(round))}</p>
-    <h2>${esc(subject(round))}</h2></header>
+  return heading + terminalPanel(p, round) + `<article class="loop-work"><header><p class="sub">${esc(round.agent)} · Iteration ${esc(round.number)} · ${esc(status(round))}</p>
+    <h2>${round.handoff ? (round.apiError ? "Harness error" : round.hasHandoff ? "Round handoff" : "Final output") : focus ? esc(subject(round)) : "Awaiting final output"}</h2></header>
+    ${round.handoff ? `<div class="md">${md(round.handoff)}</div>` : ""}
     ${details ? `<dl class="kv">${details}</dl>` : ""}
     ${!focus && round.apiError ? '<p>The harness returned an error before it published a work update.</p>' : ""}
     <div class="sub">Last report ${esc(clock(last.ts))} · ${esc(ago(last.ts))}</div></article>
     ${round.updates.length ? `<h2 class="mt2">Reported work</h2>${paged("updates:" + round.key, [...round.updates].reverse(), 8, updateRow, html => `<ol class="loop-updates">${html}</ol>`)}` : ""}
-    <details class="loop-console" data-keep-details="${esc(logKey)}" ${S.open.has(logKey) ? "open" : ""}><summary>Terminal log</summary>
+    <details class="loop-console" data-keep-details="${esc(logKey)}" ${S.open.has(logKey) ? "open" : ""}><summary>Recorded events</summary>
     <div class="loop-output" tabindex="0" aria-label="Iteration log" data-keep="${esc(JSON.stringify([p.id, round.key]))}" data-tail>
     ${round.lines.map(line => `<div class="loop-line"><time datetime="${esc(line.ts)}">${esc(clock(line.ts))}</time><span>${esc(line.text)}</span></div>`).join("")}</div></details>
     <div class="row mt2"><h2>Iteration history</h2>${pin !== undefined ? '<button class="btn small ghost" data-loop-follow>Follow latest</button>' : '<span class="sub">Following latest</span>'}</div>` +
@@ -1407,7 +1473,18 @@ $("#proj").addEventListener("change", e => { location.hash = "#/" + encodeURICom
 document.addEventListener("click", async e => {
   const b = e.target.closest("button");
   if (!b) return;
-  if (b.hasAttribute("data-loop-round") || b.hasAttribute("data-loop-follow")) {
+  if (b.hasAttribute("data-attach-log")) {
+    const { p } = route();
+    try {
+      const [handle] = await window.showOpenFilePicker({multiple: false});
+      attachedLogs.set(p.id, {handle, id: String(Date.now())});
+      render(true);
+    } catch (error) { if (error.name !== "AbortError") toast("Could not open that log file."); }
+  }
+  else if (b.hasAttribute("data-detach-log")) {
+    attachedLogs.delete(route().p.id); terminalView = {key:"", text:"", info:""}; render(true);
+  }
+  else if (b.hasAttribute("data-loop-round") || b.hasAttribute("data-loop-follow")) {
     const { p } = route();
     if (b.hasAttribute("data-loop-follow")) pinnedRounds.delete(p.id);
     else pinnedRounds.set(p.id, Number(b.dataset.loopRound));
@@ -1626,6 +1703,7 @@ $("#np-form").addEventListener("submit", async e => {
   $("#np-ok").disabled = false;
   if (ok) { $("#np").close(); location.hash = href(project, "understand"); }
 });
+refreshTerminal();
 setInterval(() => render(false), 5000);  // keeps relative timestamps fresh
 poll();
 </script>

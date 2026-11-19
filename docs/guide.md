@@ -204,6 +204,8 @@ The outcome values are `confirmed`, `not-demonstrated` and `inconclusive`. The e
 
 ## Watching iterations
 
-Open **Live loop** in the project navigation. The page follows the most recently updated round and refreshes about every two seconds. The headline shows the work the agent reported, together with its stated reason, evidence and result when available. The timeline includes the project records that agent updated during the round. Expand **Terminal log** for lifecycle messages and saved output. Timestamped activity messages appear during a round. When the runner saves a round note, its captured output appears in the log. The runner keeps the last 6,000 characters of that output.
+Open **Live loop** on localhost. For a worker started by Hades, the terminal follows its printed stdout and stderr automatically, including output before the first round event. The viewer reads the newest 64 KiB of the current launch about twice a second. Scroll up to read earlier lines in that window. The full local launch log is saved in the worker’s folder.
 
-Select an iteration to keep reading it as newer rounds arrive. **Follow latest** returns to the newest matching round. Search by agent, iteration number, or text in a report. Older runners that saved output without reporting an exit code show **Output saved**.
+For a separately started worker, browsers with local file access offer **Follow a log file**. Select its growing text log from a disk or share visible to the browser. This selection lasts for the tab session. Programs control when they flush output.
+
+The runner asks for a final handoff and saves the last 6,000 characters of stdout once per round unless round notes are disabled. Terminal viewing requires no progress posts from the model. Select an earlier round for its saved handoff and recorded events. **Follow latest** resumes following new rounds.

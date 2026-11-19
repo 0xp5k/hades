@@ -18,6 +18,8 @@ that is specific to the harness.
 Environment: PROJECT_VIEW_URL (default http://127.0.0.1:8765), PROJECT_VIEW_TOKEN (from another machine).
 """
 import argparse
+import codecs
+import socket
 import json
 import os
 import subprocess
@@ -52,32 +54,37 @@ def say(a, text):
 
 def run_harness(args, brief, timeout):
     """Run one round. Shows the harness's output as it arrives and also returns it. Returns (exit code or reason, output)."""
-    proc = subprocess.Popen(args, stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, errors="replace")
+    proc = subprocess.Popen(args, stdin=subprocess.PIPE, stdout=subprocess.PIPE)
     timed_out = threading.Event()
     timer = threading.Timer(timeout, lambda: (timed_out.set(), proc.kill()))
     timer.start()
 
     def feed():  # on its own thread, so a harness that prints before it reads cannot deadlock us
         try:
-            proc.stdin.write(brief)
+            proc.stdin.write(brief.encode("utf-8"))
             proc.stdin.close()
         except OSError:
             pass
     threading.Thread(target=feed, daemon=True).start()
-    lines = []
-    for line in proc.stdout:
-        print(line, end="", flush=True)
-        lines.append(line)
+    # Mirror flushed output even when the child has not written a newline. Keep just the
+    # final note in memory; stderr already goes directly to the launching terminal.
+    decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+    tail = ""
+    while chunk := proc.stdout.read1(16384):
+        sys.stdout.buffer.write(chunk)
+        sys.stdout.buffer.flush()
+        tail = (tail + decoder.decode(chunk))[-6000:]
+    tail = (tail + decoder.decode(b"", final=True))[-6000:]
     code = proc.wait()
     timer.cancel()
-    return (f"timeout after {timeout / 60:g} min" if timed_out.is_set() else code), "".join(lines)
+    return (f"timeout after {timeout / 60:g} min" if timed_out.is_set() else code), tail
 
 
 def main():
     p = argparse.ArgumentParser(description="Run a harness against a Hades project, nonstop.",
                                 usage="loop.py PROJECT [options] -- HARNESS COMMAND ...")
     p.add_argument("project")
-    p.add_argument("--agent", default=os.environ.get("PROJECT_VIEW_AGENT") or os.uname().nodename, help="this agent's name on the page")
+    p.add_argument("--agent", default=os.environ.get("PROJECT_VIEW_AGENT") or socket.gethostname(), help="this agent's name on the page")
     p.add_argument("--harness", help="label shown on the Agents page (default: the command's name)")
     p.add_argument("--model", help="model name shown on the Agents page (default: taken from a --model in the harness command)")
     p.add_argument("--max-iterations", type=int, default=0, help="stop after this many (default: no limit)")
@@ -91,7 +98,7 @@ def main():
     a, command = p.parse_args(argv[:cut]), argv[cut + 1:]
     if not command:
         p.error("give the harness command after --, for example:  -- claude -p")
-    a.session = uuid.uuid4().hex
+    a.session = os.environ.get("HADES_LAUNCH_SESSION") or uuid.uuid4().hex
     a.harness = a.harness or os.path.basename(command[0])
     if not a.model and "--model" in command[:-1]:  # most harnesses take the model this way; report it so the page can show it
         a.model = command[command.index("--model") + 1]
@@ -130,14 +137,8 @@ def main():
             continue
 
         n += 1
-        # Keep the human-facing work update distinct from harness output and lifecycle messages.
-        progress = {"project": a.project, "agent": a.agent, "type": "activity",
-                    "text": "<what you are working on>", "data": {"loop_session": a.session}}
-        brief += (f"\n\nFor the person watching Live loop, post a short public update to {URL}/api/events "
-                  f"when you begin and when the evidence or outcome changes. JSON: {json.dumps(progress)}. "
-                  "Use data.reason for a brief rationale, data.evidence for a source you actually consulted, "
-                  "and data.outcome for an observed result. Leave unknown fields out.")
-        with tempfile.NamedTemporaryFile("w", suffix=".txt", prefix="brief-", delete=False) as f:
+        brief += "\n\nEnd your final response with a short paragraph starting with \"Handoff:\" that gives the observed outcome and any decision the person needs to make."
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".txt", prefix="brief-", delete=False) as f:
             f.write(brief)
         say(a, f"Iteration {n} started")
         try:
