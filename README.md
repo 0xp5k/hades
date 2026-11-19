@@ -18,6 +18,6 @@ cd hades
 | Windows | `py -3 server.py --dashboard` |
 | Linux or macOS | `python3 server.py --dashboard` |
 
-Open [Hades on localhost](http://127.0.0.1:8765/). The page refreshes as your agent saves updates. Your project records stay on your machine.
+Open [Hades on localhost](http://127.0.0.1:8765/). In a chat that knows your Hades project, ask “Explain how this works.” The agent can add or update a page in **More → Library** and give you its link. From another workspace, give the agent the project URL once. The dashboard links to its reporting instructions and refreshes as the agent saves updates. Your project records stay on your machine.
 
 [Full guide](docs/guide.md) · [Agent reporting instructions](AGENTS.md)

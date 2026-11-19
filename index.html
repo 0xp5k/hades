@@ -12,6 +12,7 @@
     document.documentElement.dataset.theme = t; })();
 </script>
 <title>Hades</title>
+<link rel="help" type="text/markdown" href="/AGENTS.md" title="How to update a Hades project">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='2 2 20 20'%3E%3Cstyle%3Eg{fill:%23000}@media (prefers-color-scheme:dark){g{fill:%23fff}}%3C/style%3E%3Cg%3E%3Crect x='4.45' y='3' width='4.7' height='18'/%3E%3Crect x='14.85' y='3' width='4.7' height='18'/%3E%3Cpath d='M10.6 7.1l2.8 4.4v5.3l-2.8-4.2z'/%3E%3C/g%3E%3C/svg%3E">
 <style>
   :root {
@@ -348,15 +349,20 @@ function pages(p) {
   const runs = { id: "runs", title: "Runs" };
   const home = (p.config.phase === "survey" ? understand : sections.find(s => s.id === "s.now")) || overview;
   const results = sections.find(s => s.id === "s.experiments") || runs;
+  const library = { id: "library", title: "Library" };
+  const topics = derive(p).topics.map(topic => ({ id: "t." + topic.key, title: topic.key, topic, inLibrary: true }));
+  // Existing note pages keep their URLs and their original, editable entries.
+  const groupNote = page => page.section?.view === "note" && !["s.now", "s.surface", "s.round-notes"].includes(page.id)
+    ? { ...page, inLibrary: true } : page;
   if (p.config.simple) {
     const surface = sections.find(s => s.id === "s.surface");
     const more = sections.filter(s => s !== home && s !== results && s !== surface && s.id !== "s.round-notes");
-    return [...[home, results].map(s => ({ ...s, primary: true })), ...(surface ? [surface] : []), ...more];
+    return [...[home, results].map(s => ({ ...s, primary: true })), ...(surface ? [surface] : []), library, ...more.map(groupNote), ...topics];
   }
   const primary = [home, { id: "research", title: "Research" }, results];
-  const more = [...sections, understand, overview, runs, { id: "tasks", title: "Tasks" }, { id: "tools", title: "Tools" }]
+  const more = [library, ...sections, understand, overview, runs, { id: "tasks", title: "Tasks" }, { id: "tools", title: "Tools" }]
     .filter(s => !primary.some(x => x.id === s.id));
-  return [...primary.map(s => ({ ...s, primary: true })), ...more];
+  return [...primary.map(s => ({ ...s, primary: true })), ...more.map(groupNote), ...topics];
 }
 function route() {
   const parts = location.hash.replace(/^#\/?/, "").split("/").map(x => { try { return decodeURIComponent(x); } catch (e) { return x; } });
@@ -643,7 +649,7 @@ function drawDiagram(dg, title) {
 
 function itemCard(p, d, sec, it) {
   const runs = d.runs.filter(r => r.area === it.key).length;
-  const page = it.data?.page && pages(p).find(s => s.section?.id === it.data.page);
+  const page = it.data?.page && pages(p).find(s => s.section?.id === it.data.page || s.id === it.data.page);
   return `<div class="box glass"><div class="row"><h2>${esc(it.key)}</h2>${statusPill(it.status, sec)}</div>
     ${it.text ? `<div class="sub">${esc(it.text)}</div>` : ""}${more("item:" + sec.id + ":" + it.key, "note", it.body)}
     ${page ? `<div class="mt"><a href="${href(p.id, page.id)}">${esc(page.title)}</a></div>` : ""}
@@ -675,6 +681,22 @@ function board(p, key, cols, list, sec, isTask) {
 
 /* ---------- pages ---------- */
 const views = {
+  library(p, d, list) {
+    const entries = list.filter(page => page.inLibrary);
+    const matches = entries.filter(page => {
+      if (hit(page.title)) return true;
+      if (page.topic) return hit(page.topic.body, ...(page.topic.diagram?.nodes || []).map(node => [node.label, node.note].join(" ")));
+      return [...(d.items.get(page.section.id)?.values() || [])].some(item => hit(item.key, item.text, item.body));
+    }).sort((a, b) => a.title.localeCompare(b.title));
+    if (!matches.length) return bare(entries.length ? "No matching pages." : "Ask your agent to explain something about this project. Its page will appear here.");
+    return paged("library", matches, 20, page => `<a class="need" href="${href(p.id, page.id)}">${esc(page.title)}</a>`,
+      rows => `<div class="box glass">${rows}</div>`);
+  },
+
+  topic(t) {
+    return `<article class="box glass">${t.diagram ? drawDiagram(t.diagram, t.key) : ""}<div class="md${t.diagram ? " mt2" : ""}">${md(t.body)}</div></article>`;
+  },
+
   overview(p, d) {
     const m = d.m, review = d.tasks.filter(t => t.status === "review");
     const tile = (n, label, page) => `<a class="tile glass" href="${href(p.id, page)}"><b>${n}</b><span class="sub">${esc(label)}</span></a>`;
@@ -991,7 +1013,9 @@ function render(force) {
   lastSig = sig;
 
   $("#conn").hidden = S.connected;
-  $("#q").hidden = page?.id === "s.now" && page.section.view === "note" && (derive(p).items.get("now")?.size || 0) <= 1;
+  $("#q").placeholder = page?.id === "library" ? "Search library" : "Search this page";
+  $("#q").setAttribute("aria-label", $("#q").placeholder);
+  $("#q").hidden = !!page?.topic || page?.id === "s.now" && page.section.view === "note" && (derive(p).items.get("now")?.size || 0) <= 1;
   const ids = JSON.stringify(S.projects.map(x => [x.id, projectTitle(x)])), sel = $("#proj");
   if (ids !== lastProj) { lastProj = ids; sel.innerHTML = S.projects.map(x => `<option value="${esc(x.id)}">${esc(projectTitle(x))}</option>`).join(""); }
   sel.hidden = S.projects.length < 2;
@@ -1005,7 +1029,7 @@ function render(force) {
   const navLink = x => `<a href="${href(p.id, x.id)}" class="${x === page ? "on" : ""}" data-fk="nav:${esc(x.id)}" ${x === page ? 'aria-current="page"' : ""}>${esc(x.title)}</a>`;
   const nav = list.length ? list.filter(x => x.primary).map(navLink).join("") + `<details class="page-menu">
     <summary class="${page?.primary ? "" : "on"}" data-fk="more-pages">More</summary>
-    <div class="page-menu-list">${list.filter(x => !x.primary).map(navLink).join("")}<button class="btn small ghost new-project" data-new-project>New project</button></div></details>` : "";
+    <div class="page-menu-list">${list.filter(x => !x.primary && !x.inLibrary).map(navLink).join("")}<button class="btn small ghost new-project" data-new-project>New project</button></div></details>` : "";
   const fk = document.activeElement?.dataset.fk;
   if (nav !== lastNav) { lastNav = nav; $("#pages").innerHTML = nav; }
 
@@ -1014,10 +1038,14 @@ function render(force) {
   if (!S.loaded) $("#view").innerHTML = S.connected ? `<p class="empty">Loading…</p>` : `<div class="box glass"><h2>Cannot reach the server</h2><div class="sub">Start it with <code>python3 server.py</code>. This page will reconnect by itself.</div></div>`;
   else if (!p) $("#view").innerHTML = `<h1>No projects yet</h1><p class="goal">Project notes and results will appear here.</p><button class="btn small" data-new-project>New project</button>`;
   else {
-    const d = derive(p), body = page.section ? views.section(p, d, page.section) : views[page.id](p, d);
+    const d = derive(p);
+    let body;
+    if (page.section) body = views.section(p, d, page.section);
+    else if (page.topic) body = views.topic(page.topic);
+    else body = views[page.id](p, d, list);
     const waiting = badge(), summary = page.id === "overview" ? (p.config.summary || p.config.goal) : "";
     document.title = `${waiting ? "(" + waiting + ") " : ""}${page.title} · ${projectTitle(p)}`;
-    $("#view").innerHTML = page.id === "s.now" && page.section.view === "note" ? projectBrief(p, d, body) : `<header class="pagehead"><div class="row"><h1>${esc(page.title)}</h1>
+    $("#view").innerHTML = page.id === "s.now" && page.section.view === "note" ? projectBrief(p, d, body) : `<header class="pagehead">${page.inLibrary ? `<a class="sub" href="${href(p.id, "library")}">← Library</a>` : ""}<div class="row"><h1>${esc(page.title)}</h1>
       ${page.section?.view === "note" ? '<button class="btn small" data-note-edit="">Add note</button>' : ""}</div>
       ${summary ? `<p class="goal">${esc(summary)}</p>` : ""}</header>` + body;
   }
@@ -1086,7 +1114,13 @@ function toast(text) {
 }
 
 /* ---------- interaction ---------- */
-addEventListener("hashchange", () => { document.querySelector(".page-menu[open]")?.removeAttribute("open"); render(true); poll(); });
+addEventListener("hashchange", () => {
+  document.querySelector(".page-menu[open]")?.removeAttribute("open");
+  S.q = "";
+  $("#q").value = "";
+  render(true);
+  poll();
+});
 $("#pages").addEventListener("click", e => {
   if (e.target.closest("a, [data-new-project]")) document.querySelector(".page-menu[open]")?.removeAttribute("open");
 });

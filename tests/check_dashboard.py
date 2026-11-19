@@ -14,7 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def check(directory):
-    for name in ("server.py", "index.html"):
+    for name in ("server.py", "index.html", "AGENTS.md"):
         shutil.copy(ROOT / name, directory)
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
@@ -44,6 +44,8 @@ def check(directory):
             assert [p["id"] for p in projects] == ["workspace"]
             with urlopen(base + "/", timeout=3) as page:
                 assert b'id="view"' in page.read()
+            with urlopen(base + "/AGENTS.md", timeout=3) as guide:
+                assert b"topic" in guide.read()
             if first:
                 count = projects[0]["count"]
                 get("/api/events", {"project": "workspace", "type": "item", "section": "now",

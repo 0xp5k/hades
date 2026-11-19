@@ -1058,7 +1058,7 @@ WHO = {"project": {"type": "string"}, "agent": {"type": "string", "description":
 MCP_TOOLS = [
     {"name": "report", "description": "Report to Hades. Types: activity (what you are doing now), run (an attempt, with the artifact the "
      "verifier needs to re-score it), finding, question (ask the person, or answer one of theirs), item (an entry in one of the project's sections), "
-     "task (create or update), tool (one tool call), topic (an entry on the Understanding page: key is its title, body the explanation), "
+     "task (create or update), tool (one tool call), topic (a Library explanation page: reuse an existing title as key to update it, body is the full Markdown text), "
      "research (a linked hypothesis, observation, experiment or conclusion with evidence and a next test), "
      "proposal (a survey agent's proposed setup).",
      "inputSchema": {"type": "object", "required": ["project", "type"], "properties": {
@@ -1174,6 +1174,8 @@ def coordinator_guide(base):
     out = [f"You are the person's coordinator for Hades, a server at {base} that runs and tracks AI agent research projects.",
            f"The person watches everything on the page at {base} ; you act for them by calling the tools below.",
            "",
+           f"For explanation pages and project updates, read {base}/AGENTS.md.",
+           "",
            "HOW TO CALL A TOOL",
            f"  {call} '{{\"tool\": \"<name>\", \"args\": {{...}}}}'",
            "From another machine, add:  -H \"Authorization: Bearer $PROJECT_VIEW_COORDINATOR_TOKEN\"",
@@ -1274,6 +1276,8 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if url.path == "/":
                 self.reply(200, (ROOT / "index.html").read_bytes(), "text/html; charset=utf-8")
+            elif url.path == "/AGENTS.md":
+                self.reply(200, (ROOT / "AGENTS.md").read_bytes(), "text/markdown; charset=utf-8")
             elif url.path == "/api/projects":
                 # epoch changes on every server start, so an open page knows to refetch instead of mixing two logs
                 self.reply(200, [{"id": p, "config": public_config(p), "count": len(load(p)), "epoch": BOOT, "hold": hold(p), "notable": notable(p), "working": sorted(a for a, t in SLOTS.get(p, {}).items() if t > time.time()),
