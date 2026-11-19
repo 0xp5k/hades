@@ -350,7 +350,8 @@ function pages(p) {
   const results = sections.find(s => s.id === "s.experiments") || runs;
   if (p.config.simple) {
     const surface = sections.find(s => s.id === "s.surface");
-    return [...[home, results].map(s => ({ ...s, primary: true })), ...(surface ? [surface] : [])];
+    const more = sections.filter(s => s !== home && s !== results && s !== surface && s.id !== "s.round-notes");
+    return [...[home, results].map(s => ({ ...s, primary: true })), ...(surface ? [surface] : []), ...more];
   }
   const primary = [home, { id: "research", title: "Research" }, results];
   const more = [...sections, understand, overview, runs, { id: "tasks", title: "Tasks" }, { id: "tools", title: "Tools" }]
@@ -642,8 +643,10 @@ function drawDiagram(dg, title) {
 
 function itemCard(p, d, sec, it) {
   const runs = d.runs.filter(r => r.area === it.key).length;
+  const page = it.data?.page && pages(p).find(s => s.section?.id === it.data.page);
   return `<div class="box glass"><div class="row"><h2>${esc(it.key)}</h2>${statusPill(it.status, sec)}</div>
     ${it.text ? `<div class="sub">${esc(it.text)}</div>` : ""}${more("item:" + sec.id + ":" + it.key, "note", it.body)}
+    ${page ? `<div class="mt"><a href="${href(p.id, page.id)}">${esc(page.title)}</a></div>` : ""}
     ${sec.measured ? `<div class="sub mt2">Verifier measured <b class="num" style="color:var(--fg);font-weight:500">${fmt(it.count || 0)}</b> ${esc(sec.unit || "hits")}</div>`
       : `<div class="tags mt2">${who(it)}<span class="sub">${runs ? plural(runs, "run") + ", " : ""}updated ${ago(it.ts).toLowerCase()}</span></div>`}</div>`;
 }
