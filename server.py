@@ -49,6 +49,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
+from scripts import review
+
 ROOT = Path(__file__).parent
 PROJECTS = ROOT / "projects"
 PORT = int(os.environ.get("PROJECT_VIEW_PORT", 8765))
@@ -1366,6 +1368,8 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if url.path == "/":
                 self.reply(200, (ROOT / "index.html").read_bytes(), "text/html; charset=utf-8")
+            elif url.path == "/review":
+                self.reply(200, (ROOT / "review.html").read_bytes(), "text/html; charset=utf-8")
             elif url.path == "/AGENTS.md":
                 self.reply(200, (ROOT / "AGENTS.md").read_bytes(), "text/markdown; charset=utf-8")
             elif url.path == "/api/projects":
@@ -1407,6 +1411,61 @@ class Handler(BaseHTTPRequestHandler):
             traceback.print_exc()
             self.reply(500, {"error": f"server error: {type(e).__name__}: {e}"})
 
+    def review_request(self, path, data):
+        host = self.headers.get("Host", "")
+        port = self.server.server_port
+        allowed = {f"{name}:{port}" for name in ("localhost", "127.0.0.1", "[::1]")}
+        if port == 80:
+            allowed.update(("localhost", "127.0.0.1", "[::1]"))
+        if (self.client_address[0] not in LOCAL or host not in allowed or
+                self.headers.get("Origin") != "http://" + host or
+                self.headers.get("X-Hades-Review") != "1" or
+                self.headers.get_content_type() != "application/json"):
+            raise PermissionError("Open the review on localhost to talk to Claude.")
+        project = check_name(data.get("project"))
+        token = data.get("session")
+        if project not in project_ids() or not isinstance(token, str) or not re.fullmatch(r"[0-9a-f]{32}", token):
+            raise ValueError("Unknown project or invalid review session.")
+        key = (project, token)
+        if path == "/api/review/end":
+            review.close(key)
+            return self.reply(200, {"ended": True})
+        question = data.get("question")
+        if not isinstance(question, str) or not 0 < len(question.strip()) <= 4000:
+            raise ValueError("Enter a question of up to 4,000 characters.")
+        first = data.get("start") is True
+        prompt = "Question about the saved records:\n" + question
+        if first:
+            records = review.snapshot(list(load(project)))
+            prompt = ("Project: " + project + "\nMost recent saved experiment outcomes (up to 30):\n"
+                      + json.dumps(records, ensure_ascii=False) + "\n\n" + prompt)
+        session = review.acquire(key, first)
+        success = False
+
+        def emit(packet):
+            self.wfile.write((json.dumps(packet) + "\n").encode())
+            self.wfile.flush()
+
+        try:
+            self.send_response(200)
+            self.send_header("Content-Type", "application/x-ndjson")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.close_connection = True
+            session.reply(prompt, emit)
+            emit({"type": "done"})
+            success = True
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+        except (OSError, ValueError):
+            try:
+                emit({"type": "error", "text": "Review ended before Claude finished. Check Claude Code and sign-in on the host, then start a new review."})
+            except OSError:
+                pass
+        finally:
+            review.finish(session, success)
+
     def do_POST(self):
         role, ip = self.role(), self.client_address[0]
         if not role:
@@ -1419,6 +1478,8 @@ class Handler(BaseHTTPRequestHandler):
             if not isinstance(data, dict):
                 raise ValueError("body must be a JSON object")
             path = urlparse(self.path).path
+            if path in ("/api/review/ask", "/api/review/end"):
+                return self.review_request(path, data)
             if path == "/api/events":
                 out = ingest(data, ip, role == "verifier")
             elif path == "/api/claim":

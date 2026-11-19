@@ -8,14 +8,52 @@ import subprocess
 import sys
 import tempfile
 import time
-from urllib.request import urlopen
+from unittest.mock import patch
+from urllib.error import HTTPError
+from urllib.request import Request, urlopen
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def check_conversation():
+    # Exercise real OS pipes on every supported platform without credentials or model usage.
+    sys.path.insert(0, str(ROOT))
+    from scripts import review
+    child = """
+import json, sys
+for number, line in enumerate(sys.stdin, start=1):
+    question = json.loads(line)["message"]["content"]
+    for delta in ({"type": "thinking_delta", "thinking": "internal"}, {"type": "text_delta", "text": question}):
+        print(json.dumps({"type": "stream_event", "event": {"delta": delta}}), flush=True)
+    print(json.dumps({"type": "result", "subtype": "success", "result": str(number)}), flush=True)
+"""
+    spawn = subprocess.Popen
+    key = ("fixture", "test")
+    def fixture(argv, **kwargs):
+        assert argv[argv.index("--tools") + 1] == ""
+        return spawn([sys.executable, "-u", "-c", child], **kwargs)
+    try:
+        with patch.object(review.shutil, "which", return_value="claude"), patch.object(review.subprocess, "Popen", fixture):
+            for first, question in [(True, "First"), (False, "Follow-up")]:
+                session = review.acquire(key, first)
+                packets = []
+                if first:
+                    original = session.process
+                assert session.process is original
+                session.reply(question, packets.append)
+                assert [p["type"] for p in packets] == ["input", "text"]
+                assert packets[0]["message"]["message"]["content"] == packets[1]["text"] == question
+                review.finish(session, True)
+    finally:
+        review.close(key)
+    assert original.poll() is not None
+
+
 def check(directory):
-    for name in ("server.py", "index.html", "AGENTS.md"):
+    for name in ("server.py", "index.html", "review.html", "AGENTS.md"):
         shutil.copy(ROOT / name, directory)
+    (Path(directory) / "scripts").mkdir()
+    shutil.copy(ROOT / "scripts" / "review.py", Path(directory) / "scripts")
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
         port = sock.getsockname()[1]
@@ -49,6 +87,15 @@ def check(directory):
                 assert b'id="view"' in page.read()
             with urlopen(base + "/AGENTS.md", timeout=3) as guide:
                 assert b"topic" in guide.read()
+            with urlopen(base + "/review?project=workspace", timeout=3) as page:
+                assert b'id="composer"' in page.read()
+            request = Request(base + "/api/review/ask", b"{}", {"Origin": "https://other.example",
+                              "X-Hades-Review": "1", "Content-Type": "application/json"})
+            try:
+                urlopen(request, timeout=3)
+                raise AssertionError("Cross-origin review request succeeded")
+            except HTTPError as error:
+                assert error.code == 403
             route = "/api/run-details?project=workspace&agent=fixture&session=sample&round="
             prompt = "\nReview Ω\r\n$HOME 'literal' <tag>\n"
             if first:
@@ -90,6 +137,7 @@ def check(directory):
 
 
 if __name__ == "__main__":
+    check_conversation()
     with tempfile.TemporaryDirectory(prefix="Hades dashboard ") as workspace:
         check(workspace)
     print("Dashboard startup, live updates and restart passed.")

@@ -1009,7 +1009,8 @@ function liveLoop(p) {
   const workers = new Set([...(p.working || []), ...(p.launched || []).filter(x => x.alive).map(x => x.agent)]);
   const state = !S.connected ? "Disconnected · showing saved events" : workers.size ? plural(workers.size, "active worker") :
     p.hold ? cap(p.hold) : "No active worker reported";
-  const heading = `<p class="brief-state">${esc(state)}</p>`;
+  const heading = `<div class="row"><p class="brief-state">${esc(state)}</p>
+    <a class="btn small ghost" href="/review?project=${encodeURIComponent(p.id)}" target="_blank" rel="noopener">Review evidence with Claude ↗</a></div>`;
   if (!rounds.length) return heading + terminalPanel(p, null) + bare(lastStop ? lastStop.text : "No iterations recorded yet.");
   const status = r => r.state || (r.hasOutput ? "Output saved" :
     r.open && S.connected && (p.working || []).includes(r.agent) ? "Running" : "Start reported");
