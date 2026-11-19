@@ -211,6 +211,11 @@
   .brief-page .note-entry h2 { font-size: 21px; }
   .brief-page .note-entry .md { font-size: 17px; line-height: 1.6; }
   .brief-tools { display: flex; flex-wrap: wrap; gap: 8px 18px; align-items: baseline; margin-top: 16px; }
+  .review-filters { display: flex; flex-wrap: wrap; align-items: end; gap: 10px 18px; margin: 16px 0; }
+  .review-filters label { display: grid; gap: 4px; color: var(--muted); font-size: 13px; max-width: 100%; }
+  .review-filters select { max-width: 100%; }
+  .evidence-entry { overflow-wrap: anywhere; }
+  .evidence-entry summary { cursor: pointer; }
   .brief-tools a { color: var(--info); text-underline-offset: 3px; }
   [hidden] { display: none !important; }
 
@@ -348,6 +353,8 @@ function pages(p) {
   const runs = { id: "runs", title: "Runs" };
   const home = (p.config.phase === "survey" ? understand : sections.find(s => s.id === "s.now")) || overview;
   const results = sections.find(s => s.id === "s.experiments") || runs;
+  const evidence = { id: "evidence", title: "Evidence" };
+  const overnight = { id: "overnight", title: "Overnight review", contextual: true };
   const library = { id: "library", title: "Library" };
   const topics = derive(p).topics.map(topic => ({ id: "t." + topic.key, title: topic.key, topic, inLibrary: true }));
   // Existing note pages keep their URLs and their original, editable entries.
@@ -356,10 +363,10 @@ function pages(p) {
   if (p.config.simple) {
     const surface = sections.find(s => s.id === "s.surface");
     const more = sections.filter(s => s !== home && s !== results && s !== surface && s.id !== "s.round-notes");
-    return [...[home, results].map(s => ({ ...s, primary: true })), ...(surface ? [surface] : []), library, ...more.map(groupNote), ...topics];
+    return [...[home, results].map(s => ({ ...s, primary: true })), ...(surface ? [surface] : []), evidence, library, overnight, ...more.map(groupNote), ...topics];
   }
   const primary = [home, { id: "research", title: "Research" }, results];
-  const more = [library, ...sections, understand, overview, runs, { id: "tasks", title: "Tasks" }, { id: "tools", title: "Tools" }]
+  const more = [evidence, library, overnight, ...sections, understand, overview, runs, { id: "tasks", title: "Tasks" }, { id: "tools", title: "Tools" }]
     .filter(s => !primary.some(x => x.id === s.id));
   return [...primary.map(s => ({ ...s, primary: true })), ...more.map(groupNote), ...topics];
 }
@@ -679,7 +686,105 @@ function board(p, key, cols, list, sec, isTask) {
 }
 
 /* ---------- pages ---------- */
+const reviewFilters = new Map();
+const reviewLevels = ["Needs review", "Evidence attached", "Reviewed by verifier"];
+const checkLabels = { confirmed: "RCE confirmed", "not-demonstrated": "RCE not demonstrated", inconclusive: "Check inconclusive" };
+
+function evidenceRows(p, d) {
+  const receipts = new Map((p.experimentChecks?.records || []).map(r => [r.experiment, r]));
+  const rows = [];
+  function add(type, title, entry, summary, refs, record) {
+    const current = record && record.revision === entry.revision;
+    const outcome = current ? record.outcome : "";
+    const tags = [entry.area, entry.data?.component, ...[entry.data?.tags || []].flat()]
+      .filter(tag => typeof tag === "string" && tag.trim()).map(tag => tag.trim());
+    const needsReview = (record && !current) || outcome === "inconclusive" ||
+      (!current && (!refs.length || ["rce", "vulnerability", "lead", "inconclusive"].includes(entry.status)));
+    const reason = record && !current ? "The verifier checked an earlier revision." :
+      outcome === "inconclusive" ? "The verifier could not determine the outcome." :
+      !current && !refs.length ? "No separate evidence reference is attached." :
+      needsReview ? "The reported outcome needs independent review." : "";
+    const outcomes = [entry.status && "Reported · " + cap(entry.status), outcome && "Verifier · " + checkLabels[outcome]].filter(Boolean);
+    rows.push({ type, title, summary, refs, outcomes, tags: [...new Set(tags)], entry, record: current ? record : null,
+      level: needsReview ? 0 : current ? 2 : 1, reason });
+  }
+  for (const e of d.items.get("experiments")?.values() || []) {
+    const ref = e.data?.evidence;
+    add("Experiment", e.key, e, e.data?.outcome || e.text, ref ? [String(ref)] : [], receipts.get(e.key));
+  }
+  for (const e of d.finds) add("Finding", e.text, e, e.body, e.data?.evidence ? [String(e.data.evidence)] : []);
+  for (const e of d.research) {
+    add("Research note", e.text, e, e.body, (e.evidence || []).map(x => x.ref).filter(Boolean));
+  }
+  return rows;
+}
+
+function evidenceReview(p, d) {
+  const rows = evidenceRows(p, d), filters = reviewFilters.get(p.id) || {};
+  const options = (name, label, choices) => `<label>${label}<select class="field glass" data-review-filter="${name}">
+    <option value="">All</option>${choices.map(v => `<option value="${esc(v)}" ${filters[name] === v ? "selected" : ""}>${esc(v)}</option>`).join("")}</select></label>`;
+  const tags = [...new Set(rows.flatMap(row => row.tags))].sort();
+  if (filters.tag && !tags.includes(filters.tag)) delete filters.tag;
+  const outcomes = [...new Set(rows.flatMap(r => r.outcomes))].sort();
+  if (filters.outcome && !outcomes.includes(filters.outcome)) delete filters.outcome;
+  const filtered = rows.filter(r => (!filters.outcome || r.outcomes.includes(filters.outcome)) && (!filters.type || filters.type === r.type) &&
+    (!filters.level || filters.level === reviewLevels[r.level]) && (!filters.tag || r.tags.includes(filters.tag)) &&
+    hit(r.title, r.summary, r.entry.body, r.entry.status, r.entry.kind, r.entry.agent, ...r.outcomes, ...r.refs, ...r.tags, r.record?.build, r.record?.evidence));
+  filtered.sort((a, b) => a.level - b.level || Date.parse(b.entry.ts) - Date.parse(a.entry.ts));
+  const card = r => {
+    const e = r.entry, key = JSON.stringify([p.id, r.type, e.id || r.title, e.ts]);
+    const refs = [...new Set([...r.refs, r.record?.evidence].filter(Boolean))];
+    const link = ref => /^https?:\/\/[^\s]+$/i.test(ref) ? `<a href="${esc(ref)}" target="_blank" rel="noopener noreferrer">${esc(ref)}</a>` : esc(ref);
+    const result = r.record ? checkLabels[r.record.outcome] : "";
+    return `<article class="result-entry evidence-entry"><div class="row"><h2>${esc(r.title)}</h2><span class="pill ${r.level === 0 ? "info" : ""}">${reviewLevels[r.level]}</span></div>
+      <div class="sub">${[r.type, e.kind, ...r.tags, e.status && "Reported: " + e.status, ago(e.ts)].filter(Boolean).map(esc).join(" · ")}</div>
+      ${r.summary ? `<p>${esc(String(r.summary).slice(0, 320))}</p>` : ""}${r.reason ? `<p class="sub">${esc(r.reason)}</p>` : ""}
+      ${r.record ? `<p><b>${result}</b> · ${esc(r.record.build)} · ${esc(r.record.configuration)}</p>` : ""}
+      <details data-keep-details="${esc(key)}" ${S.open.has(key) ? "open" : ""}><summary>Source record</summary>
+      <div class="sub mt">${esc(e.agent || "Contributor unspecified")} · ${esc(new Date(e.ts).toLocaleString())}</div>
+      ${e.body || r.summary ? `<div class="md mt">${md(e.body || String(r.summary))}</div>` : ""}
+      ${refs.map(ref => `<p class="sub">${link(ref)}</p>`).join("")}</details></article>`;
+  };
+  return `${p.experimentChecks?.error ? bare(p.experimentChecks.error) : ""}<a href="${href(p.id, "overnight")}">Overnight review</a><div class="review-filters">
+    ${options("type", "Record type", ["Experiment", "Finding", "Research note"])}
+    ${options("level", "Review priority", reviewLevels)}
+    ${outcomes.length ? options("outcome", "Outcome", outcomes) : ""}
+    ${tags.length ? options("tag", "Component or tag", tags) : ""}</div>
+    <p class="sub">${filtered.length} of ${plural(rows.length, "record")} · Needs review first</p>` +
+    (filtered.length ? paged("evidence", filtered, 15, card, html => `<div class="result-list">${html}</div>`) :
+      bare(rows.length ? "No records match these filters." : "No experiments or findings have been recorded."));
+}
+
+function overnightReview(p) {
+  const now = new Date(), start = new Date(now);
+  start.setHours(20, 0, 0, 0);
+  if (start > now) start.setDate(start.getDate() - 1);
+  const end = new Date(start);
+  end.setDate(end.getDate() + 1);
+  end.setHours(8, 0, 0, 0);
+  const records = (S.events[p.id] || []).filter(e => Date.parse(e.ts) >= +start && Date.parse(e.ts) < Math.min(+end, +now + 1));
+  const short = ts => new Date(ts).toLocaleString([], {month:"short", day:"numeric", hour:"numeric", minute:"2-digit"});
+  const workers = new Set([...(p.working || []), ...(p.launched || []).filter(a => a.alive).map(a => a.agent)]);
+  const state = !S.connected ? "Connection lost" : p.hold || (workers.size ? plural(workers.size, "active agent") : "Idle");
+  const roundCount = records.filter(e => e.type === "item" && e.section === "round-notes").length;
+  const experimentCount = new Set(records.filter(e => e.type === "item" && e.section === "experiments").map(e => e.key)).size;
+  const findingCount = records.filter(e => e.type === "finding").length;
+  const label = e => e.type === "item" ? e.section === "round-notes" ? "Round note" : e.section === "experiments" ? "Experiment update" : "Project note" : cap(e.type);
+  const line = e => `<article class="result-entry evidence-entry"><div class="sub">${esc(short(e.ts))} · ${esc(label(e))}${e.agent ? " · " + esc(e.agent) : ""}</div>
+    <div>${esc(e.key || e.text || e.id || e.type)}</div>${e.key && e.text ? `<div class="sub">${esc(e.text)}</div>` : ""}
+    ${e.body ? more("overnight:" + p.id + ":" + (e.key || e.id || "") + ":" + e.ts, "saved note", e.body) : ""}</article>`;
+  return `<p class="goal">${esc(short(start))} – ${esc(short(end))} · ${esc(Intl.DateTimeFormat().resolvedOptions().timeZone)}</p>
+    <p class="sub">Now: ${esc(state)} · ${p.config.away?.until ? "Run window ends " + esc(short(p.config.away.until)) : "No project run window set"}</p>
+    <div class="brief-tools"><a href="${href(p.id, "evidence")}">All evidence</a></div>
+    <h2 class="mt2">${plural(records.length, "recorded update")}</h2>` +
+    (records.length ? `<p class="sub">${plural(roundCount, "round note")} · ${plural(experimentCount, "experiment")} updated · ${plural(findingCount, "finding")} reported</p>` +
+      paged("overnight", records.reverse(), 12, line, html => `<div class="result-list">${html}</div>`) :
+      bare("No project activity was recorded in this window."));
+}
+
 const views = {
+  evidence: evidenceReview,
+  overnight: overnightReview,
   library(p, d, list) {
     const entries = list.filter(page => page.inLibrary);
     const matches = entries.filter(page => {
@@ -912,9 +1017,9 @@ const views = {
     if (sec.view === "table" && sec.id === "experiments" && sec.columns?.includes("outcome")) {
       const checks = new Map((p.experimentChecks?.records || []).map(record => [record.experiment, record]));
       const labels = {
-        confirmed: ["RCE confirmed", "clear"],
-        "not-demonstrated": ["RCE not demonstrated", "danger"],
-        inconclusive: ["Check inconclusive", "unknown"]
+        confirmed: [checkLabels.confirmed, "clear"],
+        "not-demonstrated": [checkLabels["not-demonstrated"], "danger"],
+        inconclusive: [checkLabels.inconclusive, "unknown"]
       };
       const checked = match.map(item => {
         const revision = item.revision, record = checks.get(item.key);
@@ -924,7 +1029,7 @@ const views = {
       const rank = entry => entry.outcome === "confirmed" ? 0 : ["rce", "vulnerability", "lead"].includes(entry.item.status) ? 1 : 2;
       checked.sort((a, b) => rank(a) - rank(b) || (b.item.ts || "").localeCompare(a.item.ts || ""));
       const warning = p.experimentChecks?.error ? bare(p.experimentChecks.error) : "";
-      return warning + (checked.length ? paged("results:" + sec.id, checked, 10, ({ item: i, revision, record, outcome }) => {
+      return `<p><a href="${href(p.id, "evidence")}">Review experiments and findings</a></p>` + warning + (checked.length ? paged("results:" + sec.id, checked, 10, ({ item: i, revision, record, outcome }) => {
         const data = i.data || {}, key = "result:" + i.key, proof = key + ":record";
         const fields = sec.columns.filter(k => k !== "outcome" && data[k] != null && data[k] !== "");
         const [label, tone] = labels[outcome] || [p.experimentChecks?.error ? "Verifier records unavailable" : "No verifier record for this revision", "unknown"];
@@ -1007,7 +1112,7 @@ function projectBrief(p, d, body) {
     <p class="brief-state">${S.connected ? esc(state) + (active.size ? " · " + plural(active.size, "active agent") : "") : "Connection lost · showing the last saved update"}</p>
     <h1>${esc(projectTitle(p))}</h1>
     ${p.config.summary ? `<p class="goal">${esc(p.config.summary)}</p>` : ""}</header>
-    ${body}${d.items.get("now")?.size ? "" : '<button class="btn small ghost" data-note-edit="">Add update</button>'}</div>`;
+    ${body}<div class="brief-tools"><a href="${href(p.id, "evidence")}">Review evidence</a><a href="${href(p.id, "overnight")}">Overnight review</a></div>${d.items.get("now")?.size ? "" : '<button class="btn small ghost" data-note-edit="">Add update</button>'}</div>`;
 }
 function render(force) {
   const { p, list, page } = route(), ev = p ? (S.events[p.id] || []) : [];
@@ -1020,7 +1125,7 @@ function render(force) {
   $("#conn").hidden = S.connected;
   $("#q").placeholder = page?.id === "library" ? "Search library" : "Search this page";
   $("#q").setAttribute("aria-label", $("#q").placeholder);
-  $("#q").hidden = !!page?.topic || page?.id === "s.now" && page.section.view === "note" && (derive(p).items.get("now")?.size || 0) <= 1;
+  $("#q").hidden = page?.id === "overnight" || !!page?.topic || page?.id === "s.now" && page.section.view === "note" && (derive(p).items.get("now")?.size || 0) <= 1;
   const ids = JSON.stringify(S.projects.map(x => [x.id, projectTitle(x)])), sel = $("#proj");
   if (ids !== lastProj) { lastProj = ids; sel.innerHTML = S.projects.map(x => `<option value="${esc(x.id)}">${esc(projectTitle(x))}</option>`).join(""); }
   sel.hidden = S.projects.length < 2;
@@ -1034,7 +1139,7 @@ function render(force) {
   const navLink = x => `<a href="${href(p.id, x.id)}" class="${x === page ? "on" : ""}" data-fk="nav:${esc(x.id)}" ${x === page ? 'aria-current="page"' : ""}>${esc(x.title)}</a>`;
   const nav = list.length ? list.filter(x => x.primary).map(navLink).join("") + `<details class="page-menu">
     <summary class="${page?.primary ? "" : "on"}" data-fk="more-pages">More</summary>
-    <div class="page-menu-list">${list.filter(x => !x.primary && !x.inLibrary).map(navLink).join("")}<button class="btn small ghost new-project" data-new-project>New project</button></div></details>` : "";
+    <div class="page-menu-list">${list.filter(x => !x.primary && !x.inLibrary && !x.contextual).map(navLink).join("")}<button class="btn small ghost new-project" data-new-project>New project</button></div></details>` : "";
   const fk = document.activeElement?.dataset.fk;
   if (nav !== lastNav) { lastNav = nav; $("#pages").innerHTML = nav; }
 
@@ -1138,6 +1243,14 @@ $("#pages").addEventListener("keydown", e => {
   if (menu) { menu.open = false; menu.querySelector("summary").focus(); }
 });
 $("#view").addEventListener("change", e => {
+  if (e.target.matches("[data-review-filter]")) {
+    const { p } = route(), name = e.target.dataset.reviewFilter;
+    reviewFilters.set(p.id, { ...reviewFilters.get(p.id), [name]: e.target.value });
+    delete S.limit.evidence;
+    render(true);
+    document.querySelector(`[data-review-filter="${name}"]`)?.focus({ preventScroll: true });
+    return;
+  }
   if (e.target.matches("[data-research-filter]")) S.researchFilter = e.target.value;
   else if (e.target.matches("[data-research-view]")) S.researchView = e.target.value;
   else return;

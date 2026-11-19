@@ -13,3 +13,5 @@ When the user asks to understand something about the project, publish or revise 
 Read back the saved content and include the page link in your reply.
 
 On the Experiments page, an item status describes the reporting agent’s assessment. Cite the verifier record and its build and configuration before describing RCE as confirmed. An edit creates a new experiment revision.
+
+For the Evidence view, use an existing component name in `data.component` on experiments or in `area` on findings and research notes. Add a saved evidence reference when one is available. Review priority reflects gaps in the evidence and verifier coverage.
