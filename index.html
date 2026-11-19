@@ -216,6 +216,15 @@
   .review-filters select { max-width: 100%; }
   .evidence-entry { overflow-wrap: anywhere; }
   .evidence-entry summary { cursor: pointer; }
+  .loop-console { background: var(--inset); border: 1px solid var(--hair); border-radius: var(--r-lg); padding: 14px 16px; }
+  .loop-console .row { flex-wrap: wrap; }
+  .loop-output { max-height: min(46vh, 480px); overflow: auto; margin-top: 12px; border-top: 1px solid var(--hair); padding-top: 10px; font: 13px/1.55 ui-monospace, monospace; }
+  .loop-line { display: grid; grid-template-columns: max-content minmax(0,1fr); gap: 12px; padding-block: 2px; }
+  .loop-line time { color: var(--faint); }
+  .loop-line span { white-space: pre-wrap; overflow-wrap: anywhere; }
+  .loop-round { width: 100%; font: inherit; text-align: left; color: inherit; background: transparent; border: 0; border-top: 1px solid var(--hair); padding: 12px; cursor: pointer; }
+  .loop-round[aria-pressed=true], .loop-round:hover { background: var(--card); }
+  .loop-round .row { flex-wrap: wrap; }
   .brief-tools a { color: var(--info); text-underline-offset: 3px; }
   [hidden] { display: none !important; }
 
@@ -355,6 +364,7 @@ function pages(p) {
   const results = sections.find(s => s.id === "s.experiments") || runs;
   const evidence = { id: "evidence", title: "Evidence" };
   const overnight = { id: "overnight", title: "Overnight review", contextual: true };
+  const loop = { id: "loop", title: "Live loop" };
   const library = { id: "library", title: "Library" };
   const topics = derive(p).topics.map(topic => ({ id: "t." + topic.key, title: topic.key, topic, inLibrary: true }));
   // Existing note pages keep their URLs and their original, editable entries.
@@ -363,9 +373,9 @@ function pages(p) {
   if (p.config.simple) {
     const surface = sections.find(s => s.id === "s.surface");
     const more = sections.filter(s => s !== home && s !== results && s !== surface && s.id !== "s.round-notes");
-    return [...[home, results].map(s => ({ ...s, primary: true })), ...(surface ? [surface] : []), evidence, library, overnight, ...more.map(groupNote), ...topics];
+    return [...[home, loop, results].map(s => ({ ...s, primary: true })), ...(surface ? [surface] : []), evidence, library, overnight, ...more.map(groupNote), ...topics];
   }
-  const primary = [home, { id: "research", title: "Research" }, results];
+  const primary = [home, loop, { id: "research", title: "Research" }, results];
   const more = [evidence, library, overnight, ...sections, understand, overview, runs, { id: "tasks", title: "Tasks" }, { id: "tools", title: "Tools" }]
     .filter(s => !primary.some(x => x.id === s.id));
   return [...primary.map(s => ({ ...s, primary: true })), ...more.map(groupNote), ...topics];
@@ -775,14 +785,81 @@ function overnightReview(p) {
     ${e.body ? more("overnight:" + p.id + ":" + (e.key || e.id || "") + ":" + e.ts, "saved note", e.body) : ""}</article>`;
   return `<p class="goal">${esc(short(start))} – ${esc(short(end))} · ${esc(Intl.DateTimeFormat().resolvedOptions().timeZone)}</p>
     <p class="sub">Now: ${esc(state)} · ${p.config.away?.until ? "Run window ends " + esc(short(p.config.away.until)) : "No project run window set"}</p>
-    <div class="brief-tools"><a href="${href(p.id, "evidence")}">All evidence</a></div>
+    <div class="brief-tools"><a href="${href(p.id, "evidence")}">All evidence</a><a href="${href(p.id, "loop")}">Live loop</a></div>
     <h2 class="mt2">${plural(records.length, "recorded update")}</h2>` +
     (records.length ? `<p class="sub">${plural(roundCount, "round note")} · ${plural(experimentCount, "experiment")} updated · ${plural(findingCount, "finding")} reported</p>` +
       paged("overnight", records.reverse(), 12, line, html => `<div class="result-list">${html}</div>`) :
       bare("No project activity was recorded in this window."));
 }
 
+const pinnedRounds = new Map();
+
+function readLoop(events) {
+  const rounds = [], sessions = new Map(), agents = new Map();
+  let lastStop = null;
+  events.forEach((e, index) => {
+    if (!e.agent || (e.type !== "activity" && !(e.type === "item" && e.section === "round-notes"))) return;
+    const note = e.type === "item", session = e.data?.loop_session || "", id = JSON.stringify([e.agent, session]);
+    const marker = note ? /^Round (\d+) ·/.exec(e.key) : /^Iteration (\d+) (started$|finished \(exit 0\)$|ended badly\b)/.exec(e.text);
+    const stop = !note && (e.text || "").startsWith("Loop stopped:");
+    let round = sessions.get(id);
+    if (!session && !marker && !stop && !note) {
+      // Harness activity can be attached only when this name identifies one open round.
+      const open = agents.get(e.agent);
+      if (open?.size !== 1) return;
+      round = open.values().next().value;
+    }
+    if (stop) lastStop = e;
+    if (marker && (marker[2] === "started" || !round || round.number !== marker[1])) {
+      const open = agents.get(e.agent) || new Set();
+      if (round) { round.open = false; open.delete(round); }
+      round = { key: index, number: marker[1], agent: e.agent, harness: e.harness, ts: e.ts, state: "", open: true, lines: [] };
+      sessions.set(id, round);
+      open.add(round);
+      agents.set(e.agent, open);
+      rounds.push(round);
+    }
+    if (!round || (note && !marker) || (!marker && !stop && round.state)) return;
+    if (note) round.hasOutput = true;
+    if (marker?.[2]?.startsWith("finished")) round.state = "Finished";
+    if (marker?.[2]?.startsWith("ended badly")) round.state = "Failed";
+    if (stop) round.state ||= round.hasOutput ? "Output saved" : "Loop stopped";
+    if (round.state) { round.open = false; agents.get(round.agent)?.delete(round); }
+    round.lines.push({ ts: e.ts, text: note ? "Saved round output\n" + (e.body || e.text || "") : e.text });
+    if (stop) sessions.delete(id);
+  });
+  return { rounds, lastStop };
+}
+
+function liveLoop(p) {
+  const { rounds, lastStop } = readLoop(S.events[p.id] || []);
+  const workers = new Set([...(p.working || []), ...(p.launched || []).filter(x => x.alive).map(x => x.agent)]);
+  const state = !S.connected ? "Disconnected · showing saved events" : workers.size ? plural(workers.size, "active worker") :
+    p.hold ? cap(p.hold) : "No active worker reported";
+  const heading = `<p class="brief-state">${esc(state)}</p>`;
+  if (!rounds.length) return heading + bare(lastStop ? lastStop.text : "Waiting for the first iteration to be reported.");
+  const status = r => r.state || (r.hasOutput ? "Output saved" :
+    r.open && S.connected && (p.working || []).includes(r.agent) ? "Running" : "Start reported");
+  const visible = rounds.filter(r => hit(r.agent, r.harness, "Iteration " + r.number, status(r)) ||
+    r.lines.some(line => hit(line.text))).reverse();
+  if (!visible.length) return heading + bare("No matching iterations.");
+  const pin = pinnedRounds.get(p.id);
+  const round = visible.find(r => r.key === pin) || visible[0];
+  const last = round.lines[round.lines.length - 1];
+  const stamp = ts => new Date(ts).toLocaleString([], {month:"short", day:"numeric", hour:"numeric", minute:"2-digit"});
+  const card = r => `<button class="loop-round" data-loop-round="${r.key}" data-fk="round:${r.key}" aria-pressed="${r === round}">
+    <span class="row"><strong>Iteration ${esc(r.number)} · ${esc(r.agent)}</strong><span class="sub">${esc(status(r))}</span></span>
+    <span class="sub">${esc(stamp(r.ts))}${r.harness ? " · " + esc(r.harness) : ""}</span></button>`;
+  return heading + `<section class="loop-console"><div class="row"><h2>Iteration ${esc(round.number)} · ${esc(round.agent)}</h2><span class="pill">${esc(status(round))}</span></div>
+    <div class="sub">Last report ${esc(clock(last.ts))} · ${esc(ago(last.ts))}</div>
+    <div class="loop-output" tabindex="0" aria-label="Iteration log" data-keep="${esc(JSON.stringify([p.id, round.key]))}" data-tail>
+    ${round.lines.map(line => `<div class="loop-line"><time datetime="${esc(line.ts)}">${esc(clock(line.ts))}</time><span>${esc(line.text)}</span></div>`).join("")}</div></section>
+    <div class="row mt2"><h2>Iteration history</h2>${pin !== undefined ? '<button class="btn small ghost" data-loop-follow>Follow latest</button>' : '<span class="sub">Following latest</span>'}</div>` +
+    paged("loop-history", visible, 15, card, html => `<div class="result-list">${html}</div>`);
+}
+
 const views = {
+  loop: liveLoop,
   evidence: evidenceReview,
   overnight: overnightReview,
   library(p, d, list) {
@@ -1144,7 +1221,7 @@ function render(force) {
   if (nav !== lastNav) { lastNav = nav; $("#pages").innerHTML = nav; }
 
   const keep = {};
-  document.querySelectorAll("#view [data-keep]").forEach(el => keep[el.dataset.keep] = [el.scrollTop, el.scrollLeft]);
+  document.querySelectorAll("#view [data-keep]").forEach(el => keep[el.dataset.keep] = [el.scrollTop, el.scrollLeft, el.scrollHeight - el.clientHeight - el.scrollTop < 4]);
   if (!S.loaded) $("#view").innerHTML = S.connected ? `<p class="empty">Loading…</p>` : `<div class="box glass"><h2>Cannot reach the server</h2><div class="sub">Start it with <code>python3 server.py</code>. This page will reconnect by itself.</div></div>`;
   else if (!p) $("#view").innerHTML = `<h1>No projects yet</h1><p class="goal">Project notes and results will appear here.</p><button class="btn small" data-new-project>New project</button>`;
   else {
@@ -1159,7 +1236,7 @@ function render(force) {
       ${page.section?.view === "note" ? '<button class="btn small" data-note-edit="">Add note</button>' : ""}</div>
       ${summary ? `<p class="goal">${esc(summary)}</p>` : ""}</header>` + body;
   }
-  document.querySelectorAll("#view [data-keep]").forEach(el => { const k = keep[el.dataset.keep]; if (k) { el.scrollTop = k[0]; el.scrollLeft = k[1]; } });
+  document.querySelectorAll("#view [data-keep]").forEach(el => { const k = keep[el.dataset.keep]; if (k) { el.scrollTop = k[0]; el.scrollLeft = k[1]; } if (el.hasAttribute("data-tail") && (!k || k[2])) el.scrollTop = el.scrollHeight; });
   const where = (p ? p.id : "") + "/" + (page ? page.id : "");
   if (where !== lastPage) { lastPage = where; $("#main").scrollTop = 0; if (Object.keys(S.limit).length) { S.limit = {}; return render(true); } }
   if (fk && document.activeElement === document.body) { const el = document.querySelector(`[data-fk="${CSS.escape(fk)}"]`); if (el) el.focus({ preventScroll: true }); }
@@ -1267,7 +1344,13 @@ $("#proj").addEventListener("change", e => { location.hash = "#/" + encodeURICom
 document.addEventListener("click", async e => {
   const b = e.target.closest("button");
   if (!b) return;
-  if (b.dataset.open) { S.open.has(b.dataset.open) ? S.open.delete(b.dataset.open) : S.open.add(b.dataset.open); render(true); }
+  if (b.hasAttribute("data-loop-round") || b.hasAttribute("data-loop-follow")) {
+    const { p } = route();
+    if (b.hasAttribute("data-loop-follow")) pinnedRounds.delete(p.id);
+    else pinnedRounds.set(p.id, Number(b.dataset.loopRound));
+    render(true);
+  }
+  else if (b.dataset.open) { S.open.has(b.dataset.open) ? S.open.delete(b.dataset.open) : S.open.add(b.dataset.open); render(true); }
   else if (b.dataset.filter) { S.filter = b.dataset.filter; render(true); }
   else if (b.dataset.researchTarget) {
     S.researchFilter = "all"; S.researchView = "threads"; S.q = ""; $("#q").value = ""; S.limit["research:all"] = 100000; S.open.add("thread:" + b.dataset.researchTarget); render(true);

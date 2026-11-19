@@ -28,6 +28,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 
 URL = os.environ.get("PROJECT_VIEW_URL", "http://127.0.0.1:8765").rstrip("/")
 
@@ -44,7 +45,7 @@ def call(path, body=None):
 def say(a, text):
     print(f"[loop] {text}", flush=True)
     try:
-        call("/api/events", {"project": a.project, "type": "activity", "text": text, "agent": a.agent, "harness": a.harness, "model": a.model})
+        call("/api/events", {"project": a.project, "type": "activity", "text": text, "agent": a.agent, "harness": a.harness, "model": a.model, "data": {"loop_session": a.session}})
     except OSError:
         pass  # the server being briefly away must not stop the loop
 
@@ -90,6 +91,7 @@ def main():
     a, command = p.parse_args(argv[:cut]), argv[cut + 1:]
     if not command:
         p.error("give the harness command after --, for example:  -- claude -p")
+    a.session = uuid.uuid4().hex
     a.harness = a.harness or os.path.basename(command[0])
     if not a.model and "--model" in command[:-1]:  # most harnesses take the model this way; report it so the page can show it
         a.model = command[command.index("--model") + 1]
@@ -140,7 +142,7 @@ def main():
         if output.strip() and not a.no_notes:  # keep the harness's own account of the round where the person can read it
             try:
                 call("/api/events", {"project": a.project, "type": "item", "section": "round-notes", "agent": a.agent, "harness": a.harness,
-                                     "key": f"Round {n} · {a.agent} · {time.strftime('%Y-%m-%d %H:%M')}", "body": output.strip()[-6000:]})
+                                     "key": f"Round {n} · {a.agent} · {time.strftime('%Y-%m-%d %H:%M')}", "data": {"loop_session": a.session}, "body": output.strip()[-6000:]})
             except OSError:
                 pass
 
@@ -149,6 +151,7 @@ def main():
         except OSError:
             pass
         if code == 0:
+            say(a, f"Iteration {n} finished (exit 0)")
             failures = 0
             time.sleep(a.pause)
         else:  # back off, so a harness that fails instantly does not spin

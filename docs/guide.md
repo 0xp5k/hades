@@ -201,3 +201,9 @@ The dashboard refreshes `<project-id>.json` in that directory. Publish one compl
 ```
 
 The outcome values are `confirmed`, `not-demonstrated` and `inconclusive`. The evidence field holds a URL or an artifact reference. Editing an experiment gives it a new revision and retires its badge. An earlier record in the snapshot stays readable under that experiment. Missing or invalid records cannot produce a confirmation.
+
+## Watching iterations
+
+Open **Live loop** in the project navigation. The log follows the newest reported iteration and refreshes about every two seconds. Timestamped activity messages appear during a round. When the runner saves a round note, its captured output appears in the log. The runner keeps the last 6,000 characters of that output.
+
+Select an iteration to keep reading it as newer rounds arrive. **Follow latest** returns to the newest matching round. Search by agent, iteration number, or text in a report. Older runners that saved output without reporting an exit code show **Output saved**.
