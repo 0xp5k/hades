@@ -13,3 +13,6 @@ toys/*/baseline.json
 
 # launch recipes are specific to each machine
 launchers.json
+
+# local research notes, not for publication
+notes/

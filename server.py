@@ -55,12 +55,15 @@ COORDINATOR_TOKEN = os.environ.get("PROJECT_VIEW_COORDINATOR_TOKEN", "")
 LOCAL = ("127.0.0.1", "::1")
 LOCK = threading.RLock()
 NAME = re.compile(r"^\w[\w.-]{0,79}$")
-TYPES = ["activity", "run", "verdict", "finding", "question", "item", "task", "tool", "topic", "review", "proposal"]
-STRINGS = {"id": 80, "run": 80, "section": 80, "key": 200, "area": 200, "status": 40, "agent": 80,
+TYPES = ["activity", "run", "verdict", "finding", "question", "item", "task", "tool", "topic", "review", "proposal", "research"]
+STRINGS = {"id": 80, "run": 80, "section": 80, "key": 200, "area": 200, "scope": 500, "snapshot": 200, "status": 40, "agent": 80,
            "harness": 80, "host": 80, "model": 60, "source": 20, "body": 30000, "answer": 6000}
 EVENTS = {}  # project id -> list of events, loaded from disk on first use
 IDS = {}  # project id -> {(type, id)} already in its log, so accepting a report never has to scan the log
-KEYED = ("run", "task", "question", "proposal")
+KEYED = ("run", "task", "question", "proposal", "research")
+RESEARCH_KINDS = ("hypothesis", "observation", "experiment", "conclusion")
+RESEARCH_STATES = ("open", "supported", "contradicted", "reproduced", "superseded")
+RESEARCH_RELATIONS = ("supports", "contradicts", "depends on", "variant of", "same cause as", "follows from")
 BOOT = time.time_ns()
 
 
@@ -75,7 +78,7 @@ def load(project):
         if project not in EVENTS:
             out, f = [], PROJECTS / project / "events.jsonl"
             if f.exists():
-                for line in f.read_text().splitlines():
+                for line in f.read_text(encoding="utf-8").splitlines():
                     try:
                         out.append(json.loads(line))
                     except ValueError:
@@ -88,7 +91,7 @@ def load(project):
 def config(project):
     """Read from disk every time, so hand edits to project.json show up on the page at once."""
     try:
-        cfg = json.loads((PROJECTS / project / "project.json").read_text())
+        cfg = json.loads((PROJECTS / project / "project.json").read_text(encoding="utf-8-sig"))
     except (OSError, ValueError):
         cfg = {}
     return cfg if isinstance(cfg, dict) else {}
@@ -186,6 +189,29 @@ def ingest(data, ip="127.0.0.1", verifier=True, internal=False):
                 event[k] = data[k]
         if event.get("status") == "approved" and not internal:
             raise PermissionError("a proposal is approved from the page, not by reporting it as approved")
+    elif type == "research":
+        if data.get("kind") not in RESEARCH_KINDS:
+            raise ValueError("research kind must be one of: " + ", ".join(RESEARCH_KINDS))
+        if data.get("status") not in RESEARCH_STATES:
+            raise ValueError("research status must be one of: " + ", ".join(RESEARCH_STATES))
+        if not event["text"]:
+            raise ValueError("research needs a short claim in text")
+        event["kind"] = data["kind"]
+        for field in ("next", "conditions"):
+            if field in data:
+                event[field] = str(data[field] or "")[:2000]
+        links = data.get("links", [])
+        evidence = data.get("evidence", [])
+        if not isinstance(links, list) or len(links) > 20 or not isinstance(evidence, list) or len(evidence) > 20:
+            raise ValueError("research links and evidence must be lists of at most 20 entries")
+        if not all(isinstance(x, dict) and isinstance(x.get("to"), str) and x.get("relation") in RESEARCH_RELATIONS for x in links):
+            raise ValueError("each research link needs a target id and a known relation")
+        if not all(isinstance(x, dict) and isinstance(x.get("ref"), str) for x in evidence):
+            raise ValueError("each evidence entry needs a ref")
+        if "links" in data:
+            event["links"] = [{"to": x["to"][:80], "relation": x["relation"]} for x in links]
+        if "evidence" in data:
+            event["evidence"] = [{"ref": x["ref"][:500], "note": str(x.get("note") or "")[:1000]} for x in evidence]
     elif type in ("activity", "finding", "tool", "run") and not event["text"]:
         raise ValueError("text is required")
     if event.get("source") == "you" and ip not in LOCAL:
@@ -196,7 +222,7 @@ def ingest(data, ip="127.0.0.1", verifier=True, internal=False):
     with LOCK:
         events = load(project)
         if type in KEYED:
-            event.setdefault("id", f"{type[0]}{len(events) + 1}")
+            event.setdefault("id", f"{'k' if type == 'research' else type[0]}{len(events) + 1}")
             known = (type, event["id"]) in IDS[project]
             if not known and not event["text"]:
                 raise ValueError("text is required")
@@ -204,7 +230,7 @@ def ingest(data, ip="127.0.0.1", verifier=True, internal=False):
                 event["status"] = "queued" if type == "task" else "proposed"
         event = {"ts": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"), **event}
         (PROJECTS / project).mkdir(parents=True, exist_ok=True)
-        with open(PROJECTS / project / "events.jsonl", "a") as f:
+        with open(PROJECTS / project / "events.jsonl", "a", encoding="utf-8") as f:
             f.write(json.dumps(event) + "\n")
         events.append(event)
         if type in KEYED:
@@ -281,6 +307,26 @@ def understanding(events):
         else:
             label = "an agent's reading; the person has not checked it"
         out.append({"key": key, "body": t.get("body") or t.get("text") or "", "label": label})
+    return out
+
+
+def research(project, query="", area=""):
+    """Current research claims with their attributed update history."""
+    nodes = {}
+    for i, e in enumerate(load(check_name(project))):
+        if e["type"] == "research" and e.get("id"):
+            old = nodes.get(e["id"], {})
+            update = {k: e[k] for k in ("ts", "agent", "source", "text", "kind", "status", "area", "scope", "snapshot", "run", "body", "conditions", "next", "evidence", "links") if k in e}
+            nodes[e["id"]] = {**old, **e, "_i": i, "history": [*old.get("history", []), update]}
+    out = list(nodes.values())
+    if area:
+        out = [n for n in out if n.get("area") == area]
+    if query:
+        q = query.lower()
+        out = [n for n in out if q in " ".join(str(n.get(k) or "") for k in ("id", "text", "body", "conditions", "next", "area", "scope", "snapshot", "run")).lower()]
+    out.sort(key=lambda n: n["_i"], reverse=True)
+    for n in out:
+        n.pop("_i", None)
     return out
 
 
@@ -1013,6 +1059,7 @@ MCP_TOOLS = [
     {"name": "report", "description": "Report to Hades. Types: activity (what you are doing now), run (an attempt, with the artifact the "
      "verifier needs to re-score it), finding, question (ask the person, or answer one of theirs), item (an entry in one of the project's sections), "
      "task (create or update), tool (one tool call), topic (an entry on the Understanding page: key is its title, body the explanation), "
+     "research (a linked hypothesis, observation, experiment or conclusion with evidence and a next test), "
      "proposal (a survey agent's proposed setup).",
      "inputSchema": {"type": "object", "required": ["project", "type"], "properties": {
          **WHO, "type": {"type": "string", "enum": [t for t in TYPES if t != "verdict"]}, "text": {"type": "string"},
@@ -1020,6 +1067,12 @@ MCP_TOOLS = [
          "score": {"type": "number", "description": "run: the score you claim"}, "artifact": {"description": "run: what the verifier scores"},
          "probe": {"type": "boolean", "description": "run: true to send it only for the verifier to measure coverage; it does not count toward the metric"},
          "section": {"type": "string"}, "key": {"type": "string"}, "status": {"type": "string"}, "area": {"type": "string"},
+         "scope": {"type": "string", "description": "research: surface examined"},
+         "snapshot": {"type": "string", "description": "research: commit, build or version"},
+         "run": {"type": "string", "description": "research: producing run id"},
+         "kind": {"type": "string", "enum": list(RESEARCH_KINDS)}, "next": {"type": "string"}, "conditions": {"type": "string"},
+         "links": {"type": "array", "items": {"type": "object", "properties": {"to": {"type": "string"}, "relation": {"type": "string", "enum": list(RESEARCH_RELATIONS)}}}},
+         "evidence": {"type": "array", "items": {"type": "object", "properties": {"ref": {"type": "string"}, "note": {"type": "string"}}}},
          "body": {"type": "string", "description": "longer note shown on demand"}, "ok": {"type": "boolean"}, "ms": {"type": "number"},
          "value": {"description": "item: a chart point or key number"}, "data": {"type": "object", "description": "item: a table row's cells"},
          "answer": {"type": "string", "description": "question: your answer to a question the person asked (send its id)"},
@@ -1037,6 +1090,8 @@ MCP_TOOLS = [
          "icon": {"type": "string"}, "progress": {"type": "boolean"}}}},
     {"name": "get_runs", "description": "Your runs and what the verifier decided about each: pending, confirmed or not confirmed.",
      "inputSchema": {"type": "object", "required": ["project"], "properties": {"project": {"type": "string"}, "agent": {"type": "string"}}}},
+    {"name": "get_research", "description": "Read current linked research claims, evidence, conditions and next tests. Filter by text or area.",
+     "inputSchema": {"type": "object", "required": ["project"], "properties": {"project": {"type": "string"}, "q": {"type": "string"}, "area": {"type": "string"}}}},
     {"name": "get_brief", "description": "Your full instructions for this project, with the current state. Read this first, and again whenever you lose track.",
      "inputSchema": {"type": "object", "required": ["project", "agent"], "properties": {"project": {"type": "string"}, "agent": {"type": "string"}}}},
 ]
@@ -1171,6 +1226,8 @@ def mcp(msg, ip, verifier, base="", coordinator=False):
                 out = set_project({"project": args.get("project"), "section": {k: v for k, v in args.items() if k != "project"}})
             elif name == "get_runs":
                 out = runs_for(args.get("project"), args.get("agent") or "")
+            elif name == "get_research":
+                out = research(args.get("project"), args.get("q") or "", args.get("area") or "")
             elif name == "get_brief":
                 out = brief(args.get("project"), args.get("agent"), base)
             elif coordinator and any(t["name"] == name for t in COORDINATOR_TOOLS):
@@ -1236,6 +1293,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.reply(200, found(arg("project")))
             elif url.path == "/api/runs":
                 self.reply(200, runs_for(arg("project"), arg("agent")))
+            elif url.path == "/api/research":
+                self.reply(200, research(arg("project"), arg("q"), arg("area")))
             elif url.path == "/api/brief":
                 self.reply(200, brief(arg("project"), arg("agent")[:80], self.base()).encode(), "text/plain; charset=utf-8")
             else:
@@ -1332,4 +1391,9 @@ if __name__ == "__main__":
             sys.exit('Usage: python3 server.py --init <project> "<goal>"')
         init(sys.argv[i + 1], sys.argv[i + 2])
     else:
+        if "--dashboard" in sys.argv and not project_ids():
+            set_project({"project": "workspace", "goal": "Project updates", "sections": [
+                {"id": "now", "title": "Project brief", "view": "note"},
+                {"id": "experiments", "title": "Experiments", "view": "table", "columns": ["outcome", "evidence"]},
+            ]})
         serve(sys.argv[sys.argv.index("--host") + 1] if "--host" in sys.argv else "127.0.0.1")

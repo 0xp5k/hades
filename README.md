@@ -10,13 +10,21 @@ approve from the browser.
 
 It needs only Python 3. There is nothing to install.
 
+## Start the live dashboard
+
+From a checkout, run `py -3 server.py --dashboard` on Windows or `python3 server.py --dashboard` on Linux and macOS. Open [the local dashboard](http://127.0.0.1:8765/). The first launch creates a project brief in an empty workspace. Later launches open the existing projects.
+
+You can use one chat as the project coordinator. It reads the saved project record, writes a dated update when the work or your direction changes, and checks that it was saved. The browser polls Hades about every two seconds. A new chat can recover the shared record, including evidence references. Unreported chat history stays in the original session.
+
+The project folders and evidence are local data. A fresh clone opens its own workspace. The dashboard checks below cover displaying and persisting updates on Windows and Linux.
+
 ## Start it
 
     git clone https://github.com/0xp5k/hades && cd hades
     python3 hades.py
 
-That one command checks the install (ten checks, about five seconds, no model needed), starts the page and the verifier
-together, sets up a practice project, and opens http://127.0.0.1:8765.
+That one command checks the install (eleven checks, about five seconds, no model needed), starts the page and the verifier
+together and opens http://127.0.0.1:8765. An empty workspace starts with a practice project.
 
 Or have an assistant do it. Open Claude Code, or any coding agent, in this folder and say:
 
@@ -30,12 +38,11 @@ Other ways in:
 
 ## Try it on the practice project
 
-`python3 hades.py` creates a project called `practice`: a small interpreter with 17 planted defects and a hidden answer
-key, so you can put real agents on it and count what they find. Start an agent whichever way you like:
+In an existing workspace you can add the practice project with `python3 hades.py new tinyvm practice`.
+It contains a small interpreter with 17 planted defects and a hidden answer key. Start an agent whichever way you like:
 
     sh run-live.sh practice 3        # in another terminal: one Claude Code agent, three rounds
 
-- **From the page:** the gear, then Start agents. This is off until you allow it (`python3 hades.py --allow-launch`).
 - **By talking to Claude:** see "Run it by talking to an agent" below.
 
 Watch the page while it works: results arrive on Runs, the verifier confirms or rejects each one, and the map of the
@@ -97,14 +104,14 @@ A person has asked you to get Hades running on this machine. Do this, in order:
 3. Start the server in the background, because it does not exit: `python3 hades.py --skip-check --no-open`, adding
    `--allow-launch` only if they said yes.
 4. Read `http://127.0.0.1:8765/api/coordinator` and follow it. It lists your tools and the rules.
-5. Tell the person to open http://127.0.0.1:8765, and offer to start one agent on the `practice` project. Starting
+5. Tell the person to open http://127.0.0.1:8765. If the workspace includes `practice`, offer to start one agent there. Starting
    agents spends their model usage, so say how many agents and rounds, and wait for a yes.
 
 ## Starting agents from the server
 
 Off by default. `python3 hades.py --allow-launch` switches it on for Claude Code; or copy `launchers.example.json` to
 `launchers.json` yourself and edit the command for your harness. Each entry is a
-named recipe; Settings and the coordinator can start and stop those recipes and nothing else. Launched agents work in
+named recipe that the coordinator or launch API can start and stop. Launched agents work in
 `agent-work/<project>/<agent>/`, where `loop.log` holds each one's output. A project can name a folder (`agent_files`)
 that every new agent starts with a copy of.
 
@@ -121,18 +128,27 @@ that every new agent starts with a copy of.
 | `POST /api/slot` | Ask to start a round; honours the project's limit on agents at once |
 | `GET  /api/found?project=X` | What is confirmed and what is awaiting the verifier |
 | `GET  /api/runs?project=X&agent=NAME` | That agent's results with the verifier's decision |
+| `GET  /api/research?project=X&q=TEXT&area=AREA` | Current research threads, optionally filtered by text or area |
 | `POST /mcp` | The same as MCP tools |
 
-The Connect page in the app has copy-and-paste examples filled in with your server's address.
+A research thread is a report with `type: "research"`, a short `text` claim, `kind` (`hypothesis`, `observation`,
+`experiment`, or `conclusion`) and `status` (`open`, `supported`, `contradicted`, `reproduced`, or `superseded`).
+Optional fields are `body` for reasoning, `conditions`, `next` for the next useful test, `area`, `scope` for the surface examined,
+`snapshot` for a commit, build or version, `run` for the producing run ID, and `evidence` as
+`[{"ref": "path, URL, or run id", "note": "what it shows"}]`, and `links` as
+`[{"to": "another thread id", "relation": "supports"}]`. Other relations are `contradicts`, `depends on`,
+`variant of`, `same cause as`, and `follows from`. Reuse the returned `id` to update a thread. Unspecified evidence,
+links, context, conditions and next test survive updates. The Research page offers thread, area and activity views;
+each thread shows its attributed updates. `/api/research` returns the current state and a `history` array for each thread.
 
 ## On the page
 
-- **Overview**: what needs you, who is live, the headline number, a chart of confirmed results.
-- **Understand**: what the target is and how it works, with diagrams. Confirm a topic, flag it, edit it, ask questions.
-- **Runs**: every result, claimed against measured. **Tasks**: a board; add work and review it.
-- **Pages the project defines**: grids, boards, tables, charts, key numbers and notes. Agents can add them.
-- **Bell**: what was found and what needs you, across all projects. **Gear**: agents at once, what happens when
-  something needs you, a time limit, and light or dark.
+- The **Project brief** opens first for OpenSSH research. A note section with the ID `now` uses this layout. It shows the project question, live status, and dated update with a link to its records. The OpenSSH workspace instructions tell agents to maintain the same update as the work or your direction changes. Other projects open to Overview or, during setup, Understand.
+- **Research** shows a list of claims. Open a thread for its evidence, related claims and history.
+- **Experiments** shows outcomes first. Open an experiment for its controls and evidence. Projects without an experiments section show Runs.
+- **More** holds the remaining project pages, including sources, notes and history. On a note page, use **Add note** or **Edit**. Note bodies support Markdown.
+- To correct a saved note through Codex or Claude, open **Edit update** on the brief or **Edit** on another note page. Choose **Copy reference for agent** and paste it into the chat with your correction. The reference identifies the existing note so the agent can update it in place.
+- The header has a project switcher, page search, notifications, and a light or dark toggle.
 
 ## Running in a VM
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """The front door. One command checks this install and runs everything a single machine needs.
 
-  python3 hades.py          check the install, then start the page and the verifier together, with a practice project ready
+  python3 hades.py          check the install, then open your projects (first-time users start with practice)
   python3 hades.py check    only check that this install works: a few seconds, no model needed, nothing left behind
   python3 hades.py new <target> [name]   add a ready-made project from toys/: "tinyvm" (17 planted defects),
                             or "stdlib" (25 real parsers from Python's standard library, no answer key)
@@ -148,6 +148,27 @@ def check():
         need(notes, "the round's output did not reach the Round notes page")
         return "one round with a stand-in harness"
 
+    def research():
+        first = http("/api/events", {"project": PRACTICE, "type": "research", "agent": "self-check", "kind": "hypothesis",
+                                      "status": "open", "text": "A boundary may be wrong", "next": "Compare the guarded paths",
+                                      "scope": "tinyvm boundary", "snapshot": "practice-v1",
+                                      "evidence": [{"ref": "tinyvm.py", "note": "Candidate source"}]})
+        second = http("/api/events", {"project": PRACTICE, "type": "research", "agent": "self-check", "kind": "observation",
+                                       "status": "supported", "text": "The paths differ", "links": [{"to": first["id"], "relation": "supports"}]})
+        http("/api/events", {"project": PRACTICE, "type": "research", "id": first["id"], "agent": "self-check",
+                             "kind": "hypothesis", "status": "supported", "text": "A boundary may be wrong"})
+        nodes = {n["id"]: n for n in http(f"/api/research?project={PRACTICE}")}
+        need(nodes[first["id"]]["status"] == "supported" and nodes[first["id"]]["evidence"][0]["ref"] == "tinyvm.py",
+             "a research update lost its evidence")
+        need(nodes[first["id"]]["scope"] == "tinyvm boundary" and nodes[first["id"]]["snapshot"] == "practice-v1",
+             "a research update lost its scope or snapshot")
+        need(len(nodes[first["id"]]["history"]) == 2 and nodes[first["id"]]["history"][0]["status"] == "open"
+             and nodes[first["id"]]["history"][1]["status"] == "supported", "research history lost its changes")
+        need(nodes[second["id"]]["links"][0]["to"] == first["id"], "research links were lost")
+        need(any(e.get("id") == first["id"] for e in http(f"/api/events?project={PRACTICE}")["events"]),
+             "the dashboard event stream omitted the research thread")
+        return "linked research survives updates and appears on the dashboard"
+
     def mcp():
         hello = http("/mcp", {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}})
         need(hello["result"]["serverInfo"]["name"] == "hades", f"unexpected answer: {hello}")
@@ -171,7 +192,7 @@ def check():
 
     steps = [("The page loads", page), ("The practice project is created", project), ("A report is accepted and a malformed one refused", report),
              ("A queued task goes to exactly one agent", task), ("The brief is written", brief), ("The verifier re-scores results", scoring),
-             ("The loop runs a round", loop), ("The MCP endpoint answers", mcp), ("The coordinator guide and tools answer", coordinator),
+             ("The loop runs a round", loop), ("Research threads stay linked", research), ("The MCP endpoint answers", mcp), ("The coordinator guide and tools answer", coordinator),
              ("A new project starts in setup", setup)]
     print(f"Checking this install (Python {sys.version.split()[0]}) ...")
     failed = 0
@@ -237,19 +258,17 @@ def main(argv):
         if subprocess.run([sys.executable, str(Path(__file__).resolve()), "check"]).returncode:
             sys.exit(1)
         print()
-    created = practice()
+    if not server.project_ids():
+        practice()
     offer_launch("--allow-launch" in argv)
-    can_launch = bool(server.recipes())
-    print(f"The practice project is {'ready' if created else 'still here'}: \"{PRACTICE}\", a small interpreter with 17 planted defects.")
-    print("\nPut a real agent on it, whichever way you like:")
-    print(f"  In another terminal     sh run-live.sh {PRACTICE} 3")
-    print("  From the page           Settings, then Start agents" + ("" if can_launch else "   (off: run again with --allow-launch)"))
-    print(f"  By talking to Claude    Read {here}/api/coordinator and act as my coordinator for Hades.")
-    print(f"Then see how it did       python3 toys/tinyvm/answer_key.py score {PRACTICE}")
+    print(f"Open your project dashboard at {here}/")
+    if PRACTICE in server.project_ids():
+        print(f"  Try the practice project in another terminal: sh run-live.sh {PRACTICE} 3")
+        print(f"  See how it did: python3 toys/tinyvm/answer_key.py score {PRACTICE}")
     print("\nThe verifier runs in this process too. Ctrl-C stops both.\n")
     threading.Thread(target=verifier.loop, args=(here,), daemon=True).start()
     if "--no-open" not in argv:
-        threading.Timer(1, lambda: webbrowser.open(f"{here}/#/{PRACTICE}/overview")).start()
+        threading.Timer(1, lambda: webbrowser.open(f"{here}/")).start()
     try:
         server.serve(host)
     except KeyboardInterrupt:
