@@ -190,7 +190,6 @@
   .result-status { flex: none; font-size: 12px; font-weight: 650; border-radius: 5px; padding: 3px 8px; }
   .result-status.danger { color: var(--bad); background: color-mix(in srgb, var(--bad) 14%, transparent); }
   .result-status.clear { color: var(--ok); background: color-mix(in srgb, var(--ok) 14%, transparent); }
-  .result-status.lead { color: var(--info); background: color-mix(in srgb, var(--info) 14%, transparent); }
   .result-status.unknown { color: var(--muted); background: var(--card); }
   .result-entry summary { cursor: pointer; color: var(--muted); font-size: 13px; }
   .research-options { margin-bottom: 12px; }
@@ -911,32 +910,38 @@ const views = {
     }
 
     if (sec.view === "table" && sec.id === "experiments" && sec.columns?.includes("outcome")) {
-      const ranks = { rce: 0, vulnerability: 1, lead: 2, inconclusive: 3, "no finding": 4 };
-      const statuses = {
-        rce: ["RCE reproduced", "danger"],
-        vulnerability: ["Vulnerability reproduced", "danger"],
-        lead: ["Lead", "lead"],
-        inconclusive: ["Inconclusive", "unknown"],
-        "no finding": ["No finding", "clear"]
+      const checks = new Map((p.experimentChecks?.records || []).map(record => [record.experiment, record]));
+      const labels = {
+        confirmed: ["RCE confirmed", "clear"],
+        "not-demonstrated": ["RCE not demonstrated", "danger"],
+        inconclusive: ["Check inconclusive", "unknown"]
       };
-      const recorded = new Map();
-      for (const event of S.events[p.id] || []) {
-        if (event.type === "item" && event.section === "experiments" && event.data) {
-          recorded.set(event.key, event.ts);
-        }
-      }
-      const ordered = [...match].sort((a, b) =>
-        (ranks[a.status] ?? 3) - (ranks[b.status] ?? 3) ||
-        (recorded.get(b.key) || "").localeCompare(recorded.get(a.key) || ""));
-      return match.length ? paged("results:" + sec.id, ordered, 10, i => {
-        const data = i.data || {}, key = "result:" + i.key;
+      const checked = match.map(item => {
+        const revision = item.revision, record = checks.get(item.key);
+        const current = record && record.revision === revision;
+        return { item, revision, record, outcome: current ? record.outcome : null };
+      });
+      const rank = entry => entry.outcome === "confirmed" ? 0 : ["rce", "vulnerability", "lead"].includes(entry.item.status) ? 1 : 2;
+      checked.sort((a, b) => rank(a) - rank(b) || (b.item.ts || "").localeCompare(a.item.ts || ""));
+      const warning = p.experimentChecks?.error ? bare(p.experimentChecks.error) : "";
+      return warning + (checked.length ? paged("results:" + sec.id, checked, 10, ({ item: i, revision, record, outcome }) => {
+        const data = i.data || {}, key = "result:" + i.key, proof = key + ":record";
         const fields = sec.columns.filter(k => k !== "outcome" && data[k] != null && data[k] !== "");
-        const [label, tone] = statuses[i.status] || ["Unreviewed", "unknown"];
+        const [label, tone] = labels[outcome] || [p.experimentChecks?.error ? "Verifier records unavailable" : "No verifier record for this revision", "unknown"];
+        let receipt = "";
+        if (record) {
+          const ref = /^https?:\/\//i.test(record.evidence)
+            ? `<a href="${esc(record.evidence)}" target="_blank" rel="noopener noreferrer">${esc(record.evidence)}</a>` : esc(record.evidence);
+          receipt = `<details data-keep-details="${esc(proof)}" ${S.open.has(proof) ? "open" : ""}><summary>${outcome ? "Verifier record" : "Verifier record for a different revision"}</summary>
+            <dl class="kv"><dt>Experiment revision</dt><dd><code>${esc(record.revision)}</code></dd><dt>Result</dt><dd>${labels[record.outcome][0]}</dd>
+            <dt>Build</dt><dd>${esc(record.build)}</dd><dt>Configuration</dt><dd>${esc(record.configuration)}</dd><dt>Evidence</dt><dd>${ref}</dd></dl></details>`;
+        }
         return `<article class="result-entry"><div class="row"><h2>${esc(i.key)}</h2><span class="result-status ${tone}">${label}</span></div>
+          <div class="sub">${i.status ? "Reported status: " + esc(i.status) : ""}</div>${receipt}
           ${data.outcome ? `<div class="mt">${esc(cell(data.outcome))}</div>` : ""}
-          ${fields.length ? `<details data-keep-details="${esc(key)}" ${S.open.has(key) ? "open" : ""}><summary>Details</summary>
-            <dl class="kv">${fields.map(k => `<dt>${esc(cap(k))}</dt><dd>${esc(cell(data[k]))}</dd>`).join("")}</dl></details>` : ""}</article>`;
-      }, html => `<div class="result-list">${html}</div>`) : none;
+          ${fields.length || revision ? `<details data-keep-details="${esc(key)}" ${S.open.has(key) ? "open" : ""}><summary>Details</summary>
+            <dl class="kv">${revision ? `<dt>Experiment revision</dt><dd><code>${esc(revision)}</code></dd>` : ""}${fields.map(k => `<dt>${esc(cap(k))}</dt><dd>${esc(cell(data[k]))}</dd>`).join("")}</dl></details>` : ""}</article>`;
+      }, html => `<div class="result-list">${html}</div>`) : none);
     }
 
     if (sec.view === "table") {
@@ -1006,7 +1011,7 @@ function projectBrief(p, d, body) {
 }
 function render(force) {
   const { p, list, page } = route(), ev = p ? (S.events[p.id] || []) : [];
-  const sig = JSON.stringify([S.connected, S.loaded, p && p.id, page && page.id, S.q, [...S.open], S.filter, S.researchFilter, S.researchView, S.utab, S.limit, S.projects.map(x => [x.id, x.config, x.hold, x.working, x.launched, (x.notable || []).length]), ev.length, Math.floor(Date.now() / 20000)]);
+  const sig = JSON.stringify([S.connected, S.loaded, p && p.id, page && page.id, S.q, [...S.open], S.filter, S.researchFilter, S.researchView, S.utab, S.limit, S.projects.map(x => [x.id, x.config, x.experimentChecks, x.hold, x.working, x.launched, (x.notable || []).length]), ev.length, Math.floor(Date.now() / 20000)]);
   // A background refresh must never pull the page out from under the reader: wait while text is selected or a
   // click is in progress (replacing a button between press and release would swallow the click).
   if (!force && (sig === lastSig || selecting() || pressing)) return;

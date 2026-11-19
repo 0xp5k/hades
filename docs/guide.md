@@ -177,3 +177,27 @@ each machine that runs agents. Hades only starts agents if you create `launchers
   reached, so "covered" there is easy to reach and says little.
 - Turn-taking under an agent limit is rough: a waiting agent checks every 15 seconds.
 - Desktop notifications, remote tokens and MCP clients are written but lightly tested.
+
+## Displaying completed verifier checks
+
+On the Experiments table, a green badge means the verifier recorded RCE on the stated build and configuration for that exact experiment revision. Expand **Verifier record** to inspect the evidence. A check that ran without demonstrating RCE shows **RCE not demonstrated**. A check that could not establish an outcome shows **Check inconclusive**. Agent reports and ordinary run scores cannot award these badges.
+
+Set `HADES_EVIDENCE_DIR` in the dashboard process environment to an absolute directory holding completed reports. Give the dashboard read access. Only the verifier or its operator should have write access. The directory permissions establish the identity of the publisher. Agents sharing the publisher’s OS credentials would share its authority.
+
+The dashboard refreshes `<project-id>.json` in that directory. Publish one complete snapshot per project, replacing the file atomically. Use the experiment key and the full revision shown under **Details**. Include one record per experiment. For example, a completed check might be recorded as follows.
+
+```json
+{
+  "project": "sample",
+  "checks": [{
+    "experiment": "Configuration review",
+    "revision": "131a0a12320e4a51be75211c26fd2a09",
+    "outcome": "inconclusive",
+    "build": "release 3.1",
+    "configuration": "standard image",
+    "evidence": "https://records.example.org/checks/42"
+  }]
+}
+```
+
+The outcome values are `confirmed`, `not-demonstrated` and `inconclusive`. The evidence field holds a URL or an artifact reference. Editing an experiment gives it a new revision and retires its badge. An earlier record in the snapshot stays readable under that experiment. Missing or invalid records cannot produce a confirmation.

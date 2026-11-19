@@ -26,10 +26,13 @@ def check(directory):
         with urlopen(base + route, body, timeout=3) as response:
             return json.load(response)
 
+    archive = Path(directory) / "reports"
+    archive.mkdir()
+    snapshot = archive / "workspace.json"
     message = "Review complete — résumé 日本語"
     for first in (True, False):
         proc = subprocess.Popen([sys.executable, "server.py", "--dashboard"], cwd=directory,
-                                env={**os.environ, "PROJECT_VIEW_PORT": str(port)})
+                                env={**os.environ, "PROJECT_VIEW_PORT": str(port), "HADES_EVIDENCE_DIR": str(archive)})
         try:
             for _ in range(100):
                 if proc.poll() is not None:
@@ -47,7 +50,22 @@ def check(directory):
             with urlopen(base + "/AGENTS.md", timeout=3) as guide:
                 assert b"topic" in guide.read()
             if first:
-                count = projects[0]["count"]
+                claim = {"project": "workspace", "type": "item", "section": "experiments",
+                         "key": "Sample", "status": "rce", "revision": "forged"}
+                saved = get("/api/events", claim)
+                assert len(saved["revision"]) == 32 and saved["revision"] != "forged"
+                assert not get("/api/projects")[0]["experimentChecks"]
+                record = {"experiment": "Sample", "revision": saved["revision"], "outcome": "inconclusive",
+                          "build": "sample", "configuration": "default", "evidence": "artifact-1"}
+                snapshot.write_text(json.dumps({"project": "other", "checks": [record]}))
+                assert "error" in get("/api/projects")[0]["experimentChecks"]
+                snapshot.write_text(json.dumps({"project": "workspace", "checks": [record]}))
+                assert get("/api/projects")[0]["experimentChecks"]["records"] == [record]
+                assert get("/api/events", claim)["revision"] != record["revision"]
+                snapshot.write_text("{")
+                assert "error" in get("/api/projects")[0]["experimentChecks"]
+                snapshot.unlink()
+                count = get("/api/projects")[0]["count"]
                 get("/api/events", {"project": "workspace", "type": "item", "section": "now",
                                     "key": "Current update", "body": message})
                 assert get("/api/projects")[0]["count"] == count + 1

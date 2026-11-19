@@ -11,3 +11,5 @@ When the user asks to understand something about the project, publish or revise 
 - If a grid card introduces the subject, preserve its content and set its `data.page` to `t.<title>` for a topic or the section ID for a configured note.
 
 Read back the saved content and include the page link in your reply.
+
+On the Experiments page, an item status describes the reporting agent’s assessment. Cite the verifier record and its build and configuration before describing RCE as confirmed. An edit creates a new experiment revision.

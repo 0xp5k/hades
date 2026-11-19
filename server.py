@@ -31,6 +31,7 @@ The scoring command lives in project.json and can only be changed by editing tha
 Reading (the page and the GET endpoints) is open to anyone who can reach the port.
 """
 import datetime as dt
+import hashlib
 import hmac
 import json
 import os
@@ -42,6 +43,7 @@ import sys
 import threading
 import time
 import traceback
+import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -78,9 +80,14 @@ def load(project):
         if project not in EVENTS:
             out, f = [], PROJECTS / project / "events.jsonl"
             if f.exists():
+                history = hashlib.sha256()
                 for line in f.read_text(encoding="utf-8").splitlines():
                     try:
-                        out.append(json.loads(line))
+                        event = json.loads(line)
+                        history.update((line + "\n").encode("utf-8"))
+                        if event.get("type") == "item" and event.get("section") == "experiments":
+                            event.setdefault("revision", history.hexdigest()[:32])
+                        out.append(event)
                     except ValueError:
                         pass
             EVENTS[project] = out
@@ -103,6 +110,40 @@ def public_config(project):
     if isinstance(m, dict):
         cfg["metric"] = {**{k: v for k, v in m.items() if k != "verify"}, "verified": bool(m.get("verify"))}
     return cfg
+
+
+def experiment_checks(project):
+    """Read a published snapshot from a directory managed outside the reporting API."""
+    directory = os.environ.get("HADES_EVIDENCE_DIR")
+    if not directory:
+        return {}
+    try:
+        path = Path(directory) / (check_name(project) + ".json")
+        with path.open("rb") as stream:
+            raw = stream.read(1024 * 1024 + 1)
+        if len(raw) > 1024 * 1024:
+            raise ValueError
+        snapshot = json.loads(raw)
+        if not isinstance(snapshot, dict) or snapshot.get("project") != project or not isinstance(snapshot.get("checks"), list):
+            raise ValueError
+        checks = {}
+        for record in snapshot["checks"]:
+            fields = ("experiment", "build", "configuration", "evidence", "outcome")
+            if not isinstance(record, dict) or not all(isinstance(record.get(k), str) and record[k].strip() for k in fields):
+                raise ValueError
+            revision = record.get("revision")
+            if not isinstance(revision, str) or not re.fullmatch(r"[a-f0-9]{32}", revision):
+                raise ValueError
+            if record["outcome"] not in ("confirmed", "not-demonstrated", "inconclusive"):
+                raise ValueError
+            if record["experiment"] in checks:
+                raise ValueError
+            checks[record["experiment"]] = {**{k: record[k] for k in fields}, "revision": revision}
+        return {"records": list(checks.values())}
+    except FileNotFoundError:
+        return {}
+    except (OSError, ValueError, RecursionError):
+        return {"error": "Verifier records could not be read."}
 
 
 def project_ids():
@@ -214,6 +255,8 @@ def ingest(data, ip="127.0.0.1", verifier=True, internal=False):
             event["evidence"] = [{"ref": x["ref"][:500], "note": str(x.get("note") or "")[:1000]} for x in evidence]
     elif type in ("activity", "finding", "tool", "run") and not event["text"]:
         raise ValueError("text is required")
+    if type == "item" and event["section"] == "experiments":
+        event["revision"] = uuid.uuid4().hex
     if event.get("source") == "you" and ip not in LOCAL:
         raise PermissionError("only the page on the server's own machine may act as the person")
     if event.get("agent"):
@@ -1280,7 +1323,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.reply(200, (ROOT / "AGENTS.md").read_bytes(), "text/markdown; charset=utf-8")
             elif url.path == "/api/projects":
                 # epoch changes on every server start, so an open page knows to refetch instead of mixing two logs
-                self.reply(200, [{"id": p, "config": public_config(p), "count": len(load(p)), "epoch": BOOT, "hold": hold(p), "notable": notable(p), "working": sorted(a for a, t in SLOTS.get(p, {}).items() if t > time.time()),
+                self.reply(200, [{"id": p, "config": public_config(p), "count": len(load(p)), "epoch": BOOT, "experimentChecks": experiment_checks(p), "hold": hold(p), "notable": notable(p), "working": sorted(a for a, t in SLOTS.get(p, {}).items() if t > time.time()),
                                   "launched": launched(p), "recipes": {k: v.get("label", k) for k, v in recipes().items()}} for p in project_ids()])
             elif url.path == "/api/events":
                 events, after = load(check_name(arg("project"))), max(0, int(arg("after") or 0))
