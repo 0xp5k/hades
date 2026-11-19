@@ -130,6 +130,13 @@ def main():
             continue
 
         n += 1
+        # Keep the human-facing work update distinct from harness output and lifecycle messages.
+        progress = {"project": a.project, "agent": a.agent, "type": "activity",
+                    "text": "<what you are working on>", "data": {"loop_session": a.session}}
+        brief += (f"\n\nFor the person watching Live loop, post a short public update to {URL}/api/events "
+                  f"when you begin and when the evidence or outcome changes. JSON: {json.dumps(progress)}. "
+                  "Use data.reason for a brief rationale, data.evidence for a source you actually consulted, "
+                  "and data.outcome for an observed result. Leave unknown fields out.")
         with tempfile.NamedTemporaryFile("w", suffix=".txt", prefix="brief-", delete=False) as f:
             f.write(brief)
         say(a, f"Iteration {n} started")

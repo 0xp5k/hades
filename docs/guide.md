@@ -204,6 +204,6 @@ The outcome values are `confirmed`, `not-demonstrated` and `inconclusive`. The e
 
 ## Watching iterations
 
-Open **Live loop** in the project navigation. The log follows the newest reported iteration and refreshes about every two seconds. Timestamped activity messages appear during a round. When the runner saves a round note, its captured output appears in the log. The runner keeps the last 6,000 characters of that output.
+Open **Live loop** in the project navigation. The page follows the most recently updated round and refreshes about every two seconds. The headline shows the work the agent reported, together with its stated reason, evidence and result when available. The timeline includes the project records that agent updated during the round. Expand **Terminal log** for lifecycle messages and saved output. Timestamped activity messages appear during a round. When the runner saves a round note, its captured output appears in the log. The runner keeps the last 6,000 characters of that output.
 
 Select an iteration to keep reading it as newer rounds arrive. **Follow latest** returns to the newest matching round. Search by agent, iteration number, or text in a report. Older runners that saved output without reporting an exit code show **Output saved**.

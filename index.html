@@ -217,7 +217,14 @@
   .evidence-entry { overflow-wrap: anywhere; }
   .evidence-entry summary { cursor: pointer; }
   .loop-console { background: var(--inset); border: 1px solid var(--hair); border-radius: var(--r-lg); padding: 14px 16px; }
-  .loop-console .row { flex-wrap: wrap; }
+  .loop-console summary { cursor: pointer; }
+  .loop-work { padding: clamp(16px, 3vw, 26px); margin-bottom: 16px; border: 1px solid var(--hair); border-radius: var(--r-lg); background: var(--glass); overflow-wrap: anywhere; }
+  .loop-work header p { margin: 0 0 6px; }
+  .loop-work h2 { max-width: 56ch; font-size: clamp(20px, 3vw, 26px); }
+  .loop-updates { list-style: none; margin: 0 0 16px; padding: 0; }
+  .loop-updates li { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 16px; padding: 10px 0; border-top: 1px solid var(--hair); overflow-wrap: anywhere; }
+  .loop-updates time { color: var(--muted); font-size: 13px; }
+  .loop-updates li p { white-space: pre-wrap; }
   .loop-output { max-height: min(46vh, 480px); overflow: auto; margin-top: 12px; border-top: 1px solid var(--hair); padding-top: 10px; font: 13px/1.55 ui-monospace, monospace; }
   .loop-line { display: grid; grid-template-columns: max-content minmax(0,1fr); gap: 12px; padding-block: 2px; }
   .loop-line time { color: var(--faint); }
@@ -794,14 +801,38 @@ function overnightReview(p) {
 
 const pinnedRounds = new Map();
 
+function publicLoopUpdate(e) {
+  const data = e.data || {};
+  const refs = [data.evidence, ...(Array.isArray(e.evidence) ? e.evidence.map(ref => ref.ref) : [])]
+    .flat().filter(ref => typeof ref === "string" && ref.trim());
+  let title, label, detail;
+  if (e.type === "activity") {
+    title = e.text; label = "Progress update";
+  } else if (e.type === "item" && e.section === "experiments") {
+    title = data.question || e.key; label = "Experiment updated";
+  } else if (e.type === "finding" || e.type === "research" || e.type === "question") {
+    title = e.text || e.id; label = e.type === "research" ? "Research note" : cap(e.type);
+    detail = e.body;
+  } else if (e.type === "topic" || e.type === "item") {
+    title = e.key; label = e.type === "topic" ? "Library page updated" : "Project entry updated";
+    detail = e.text;
+  } else if (e.type === "tool") {
+    title = e.text; label = e.ok === false ? "Tool reported an error" : "Tool reported";
+  } else return null;
+  if (!title) return null;
+  return { title, label, detail, refs, reason: data.reason, outcome: data.outcome, ts: e.ts,
+    focus: ["activity", "research", "finding", "question"].includes(e.type) || e.section === "experiments" };
+}
+
 function readLoop(events) {
   const rounds = [], sessions = new Map(), agents = new Map();
   let lastStop = null;
   events.forEach((e, index) => {
-    if (!e.agent || (e.type !== "activity" && !(e.type === "item" && e.section === "round-notes"))) return;
-    const note = e.type === "item", session = e.data?.loop_session || "", id = JSON.stringify([e.agent, session]);
-    const marker = note ? /^Round (\d+) ·/.exec(e.key) : /^Iteration (\d+) (started$|finished \(exit 0\)$|ended badly\b)/.exec(e.text);
-    const stop = !note && (e.text || "").startsWith("Loop stopped:");
+    if (!e.agent) return;
+    const note = e.type === "item" && e.section === "round-notes", session = e.data?.loop_session || "", id = JSON.stringify([e.agent, session]);
+    const activity = e.type === "activity";
+    const marker = note ? /^Round (\d+) ·/.exec(e.key) : activity && /^Iteration (\d+) (started$|finished \(exit 0\)$|ended badly\b)/.exec(e.text);
+    const stop = activity && (e.text || "").startsWith("Loop stopped:");
     let round = sessions.get(id);
     if (!session && !marker && !stop && !note) {
       // Harness activity can be attached only when this name identifies one open round.
@@ -813,19 +844,29 @@ function readLoop(events) {
     if (marker && (marker[2] === "started" || !round || round.number !== marker[1])) {
       const open = agents.get(e.agent) || new Set();
       if (round) { round.open = false; open.delete(round); }
-      round = { key: index, number: marker[1], agent: e.agent, harness: e.harness, ts: e.ts, state: "", open: true, lines: [] };
+      round = { key: index, number: marker[1], agent: e.agent, harness: e.harness, ts: e.ts, state: "", open: true, lines: [], updates: [] };
       sessions.set(id, round);
       open.add(round);
       agents.set(e.agent, open);
       rounds.push(round);
     }
     if (!round || (note && !marker) || (!marker && !stop && round.state)) return;
-    if (note) round.hasOutput = true;
+    const update = !note && !marker && !stop ? publicLoopUpdate(e) : null;
+    if (!note && !marker && !stop && !update) return;
+    if (update) {
+      round.updates.push(update);
+      if (update.focus) round.focus = update;
+    }
+    if (note) {
+      round.hasOutput = true;
+      if (/^API Error:/i.test(e.body || "")) round.apiError = true;
+    }
     if (marker?.[2]?.startsWith("finished")) round.state = "Finished";
     if (marker?.[2]?.startsWith("ended badly")) round.state = "Failed";
     if (stop) round.state ||= round.hasOutput ? "Output saved" : "Loop stopped";
     if (round.state) { round.open = false; agents.get(round.agent)?.delete(round); }
-    round.lines.push({ ts: e.ts, text: note ? "Saved round output\n" + (e.body || e.text || "") : e.text });
+    round.lines.push({ ts: e.ts, text: note ? "Saved round output\n" + (e.body || e.text || "") : update && !activity ? update.label + " · " + update.title : e.text });
+    round.lastEvent = index;
     if (stop) sessions.delete(id);
   });
   return { rounds, lastStop };
@@ -841,19 +882,41 @@ function liveLoop(p) {
   const status = r => r.state || (r.hasOutput ? "Output saved" :
     r.open && S.connected && (p.working || []).includes(r.agent) ? "Running" : "Start reported");
   const visible = rounds.filter(r => hit(r.agent, r.harness, "Iteration " + r.number, status(r)) ||
-    r.lines.some(line => hit(line.text))).reverse();
+    r.lines.some(line => hit(line.text)) || r.updates.some(u => hit(u.reason, u.outcome, u.detail, ...u.refs)))
+    .sort((a, b) => b.lastEvent - a.lastEvent);
   if (!visible.length) return heading + bare("No matching iterations.");
   const pin = pinnedRounds.get(p.id);
   const round = visible.find(r => r.key === pin) || visible[0];
   const last = round.lines[round.lines.length - 1];
   const stamp = ts => new Date(ts).toLocaleString([], {month:"short", day:"numeric", hour:"numeric", minute:"2-digit"});
+  const subject = r => r.focus?.title || r.updates[r.updates.length - 1]?.title ||
+    (r.apiError ? "Harness reported an API error" : r.state === "Failed" ? "Harness exited with an error" :
+      r.hasOutput ? "Round output saved" : "Waiting for a work update");
   const card = r => `<button class="loop-round" data-loop-round="${r.key}" data-fk="round:${r.key}" aria-pressed="${r === round}">
-    <span class="row"><strong>Iteration ${esc(r.number)} · ${esc(r.agent)}</strong><span class="sub">${esc(status(r))}</span></span>
-    <span class="sub">${esc(stamp(r.ts))}${r.harness ? " · " + esc(r.harness) : ""}</span></button>`;
-  return heading + `<section class="loop-console"><div class="row"><h2>Iteration ${esc(round.number)} · ${esc(round.agent)}</h2><span class="pill">${esc(status(round))}</span></div>
-    <div class="sub">Last report ${esc(clock(last.ts))} · ${esc(ago(last.ts))}</div>
+    <span class="row"><strong>${esc(subject(r))}</strong><span class="sub">${esc(status(r))}</span></span>
+    <span class="sub">${esc(r.agent)} · Iteration ${esc(r.number)} · ${esc(stamp(r.ts))}</span></button>`;
+  const focus = round.focus || round.updates[round.updates.length - 1];
+  const source = ref => /^https?:\/\/[^\s]+$/i.test(ref)
+    ? `<a href="${esc(ref)}" target="_blank" rel="noopener noreferrer">${esc(ref)}</a>` : esc(ref);
+  const facts = u => [
+    u.reason && `<dt>Stated reason</dt><dd>${esc(u.reason)}</dd>`,
+    u.refs.length && `<dt>Evidence</dt><dd>${u.refs.map(source).join("<br>")}</dd>`,
+    u.outcome && `<dt>Reported result</dt><dd>${esc(u.outcome)}</dd>`
+  ].filter(Boolean).join("");
+  const details = focus && facts(focus);
+  const updateRow = u => `<li><time datetime="${esc(u.ts)}">${esc(clock(u.ts))}</time><div><span class="sub">${esc(u.label)}</span>
+    <div>${esc(u.title)}</div>${u.detail && u.detail !== u.title ? `<p>${esc(u.detail)}</p>` : ""}
+    ${u !== focus && facts(u) ? `<dl class="kv">${facts(u)}</dl>` : ""}</div></li>`;
+  const logKey = `loop-log:${p.id}:${round.key}`;
+  return heading + `<article class="loop-work"><header><p class="sub">${esc(round.agent)} · Iteration ${esc(round.number)} · ${esc(status(round))}</p>
+    <h2>${esc(subject(round))}</h2></header>
+    ${details ? `<dl class="kv">${details}</dl>` : ""}
+    ${!focus && round.apiError ? '<p>The harness returned an error before it published a work update.</p>' : ""}
+    <div class="sub">Last report ${esc(clock(last.ts))} · ${esc(ago(last.ts))}</div></article>
+    ${round.updates.length ? `<h2 class="mt2">Reported work</h2>${paged("updates:" + round.key, [...round.updates].reverse(), 8, updateRow, html => `<ol class="loop-updates">${html}</ol>`)}` : ""}
+    <details class="loop-console" data-keep-details="${esc(logKey)}" ${S.open.has(logKey) ? "open" : ""}><summary>Terminal log</summary>
     <div class="loop-output" tabindex="0" aria-label="Iteration log" data-keep="${esc(JSON.stringify([p.id, round.key]))}" data-tail>
-    ${round.lines.map(line => `<div class="loop-line"><time datetime="${esc(line.ts)}">${esc(clock(line.ts))}</time><span>${esc(line.text)}</span></div>`).join("")}</div></section>
+    ${round.lines.map(line => `<div class="loop-line"><time datetime="${esc(line.ts)}">${esc(clock(line.ts))}</time><span>${esc(line.text)}</span></div>`).join("")}</div></details>
     <div class="row mt2"><h2>Iteration history</h2>${pin !== undefined ? '<button class="btn small ghost" data-loop-follow>Follow latest</button>' : '<span class="sub">Following latest</span>'}</div>` +
     paged("loop-history", visible, 15, card, html => `<div class="result-list">${html}</div>`);
 }
