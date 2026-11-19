@@ -219,6 +219,12 @@
   .loop-console { background: var(--inset); border: 1px solid var(--hair); border-radius: var(--r-lg); padding: 14px 16px; }
   .loop-console { margin-block: 12px; }
   .loop-console pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+  .run-info-button { border: 1px solid var(--hair-2); border-radius: 50%; background: transparent; color: var(--muted); font: 600 12px/1 Georgia,serif; cursor: pointer; width: 22px; height: 22px; flex: none; }
+  .run-info-button:hover, .run-info-button:focus-visible { color: var(--fg); border-color: currentColor; }
+  #run-info { max-height: 85vh; overflow: auto; }
+  #run-info pre { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 13px; }
+  #run-info section + section { margin-top: 20px; border-top: 1px solid var(--hair); padding-top: 14px; }
+  #run-info h3 { margin-bottom: 5px; }
   .loop-console summary { cursor: pointer; }
   .loop-work { padding: clamp(16px, 3vw, 26px); margin-bottom: 16px; border: 1px solid var(--hair); border-radius: var(--r-lg); background: var(--glass); overflow-wrap: anywhere; }
   .loop-work header p { margin: 0 0 6px; }
@@ -273,6 +279,10 @@
   </header>
   <div class="shell"><div id="view"><p class="empty">Loading…</p></div></div>
 </main>
+<dialog id="run-info" class="glass wide" aria-labelledby="run-info-title">
+  <div class="row"><h2 id="run-info-title">Run details</h2><form method="dialog"><button class="btn small ghost" autofocus>Close</button></form></div>
+  <p class="sub" id="run-info-round"></p><div id="run-info-content"></div>
+</dialog>
 <dialog id="note-dialog" class="glass wide" aria-labelledby="note-dialog-h">
   <form id="note-form">
     <h2 id="note-dialog-h">Add note</h2>
@@ -807,18 +817,75 @@ const pinnedRounds = new Map();
 const attachedLogs = new Map();
 let terminalView = { key: "", text: "", info: "" };
 
-function terminalPanel(p, round) {
-  const pinned = pinnedRounds.has(p.id);
+function runInfoButton(p, agent, session, number) {
+  return `<button type="button" class="run-info-button" data-run-info data-project="${esc(p.id)}" data-agent="${esc(agent)}" data-session="${esc(session || "")}" data-round="${esc(number)}" aria-label="Run details for ${esc(agent)}, iteration ${esc(number)}" aria-haspopup="dialog" title="Run details">i</button>`;
+}
+
+let detailsTimer = 0, detailsSequence = 0;
+async function showRunInfo(button) {
+  const dialog = $("#run-info"), body = $("#run-info-content");
+  const {project, agent, session, round} = button.dataset;
+  const sequence = ++detailsSequence;
+  const params = new URLSearchParams({project, agent, session, round});
+  $("#run-info-round").textContent = `${agent} · Iteration ${round}`;
+  body.textContent = "Loading invocation…";
+  dialog.showModal();
+  let previous = "";
+  async function read() {
+    try {
+      const response = await fetch("/api/run-details?" + params, {cache: "no-store"});
+      if (!response.ok) throw Error(response.status === 403 ? "Open Hades on localhost to read run details." : "Could not load run details.");
+      const records = await response.json();
+      if (sequence !== detailsSequence || !dialog.open) return;
+      const signature = JSON.stringify(records);
+      if (previous !== signature) {
+        previous = signature;
+        const cli = records.filter(r => r.stage === "cli");
+        const section = r => {
+          const el = document.createElement("section");
+          el.innerHTML = '<p class="sub"></p><h3>Command</h3><pre></pre><h3>Standard input</h3><pre></pre>';
+          el.querySelector("p").textContent = r.source;
+          const [cmd, input] = el.querySelectorAll("pre");
+          cmd.textContent = r.command;
+          input.textContent = r.stdin || "(empty)";
+          return el;
+        };
+        const wrapper = records.filter(r => r.stage === "wrapper");
+        body.replaceChildren(...cli.map(section));
+        if (!cli.length) body.textContent = wrapper.length ? "Final CLI invocation has not been captured." : "No invocation was recorded for this iteration.";
+        if (wrapper.length) {
+          const outer = document.createElement("details");
+          outer.innerHTML = "<summary>Original wrapper command and input</summary>";
+          outer.append(...wrapper.map(section));
+          body.append(outer);
+        }
+      }
+    } catch (error) {
+      if (sequence !== detailsSequence || !dialog.open) return;
+      previous = ""; body.textContent = error.message;
+    }
+    if (sequence === detailsSequence && dialog.open) detailsTimer = setTimeout(read, 2000);
+  }
+  read();
+}
+$("#run-info").addEventListener("close", () => { ++detailsSequence; clearTimeout(detailsTimer); });
+
+function terminalLaunch(p, round) {
   const launches = p.launched || [];
-  let launch = launches.find(x => x.session && x.session === round?.session);
-  if (!pinned && !launch?.alive) launch = [...launches].reverse().find(x => x.alive && x.session) || launch;
+  const selected = launches.find(x => x.session && x.session === round?.session);
+  if (pinnedRounds.has(p.id) || selected?.alive) return selected;
+  return [...launches].reverse().find(x => x.alive && x.session) || selected;
+}
+
+function terminalPanel(p, round, launch = terminalLaunch(p, round)) {
+  const pinned = pinnedRounds.has(p.id);
   const file = pinned ? null : attachedLogs.get(p.id);
   const choose = window.showOpenFilePicker && !pinned ? '<button class="btn small ghost" data-attach-log>Follow a log file</button>' : "";
   if (!file && !launch) return choose ? `<div class="brief-tools">${choose}</div>` : "";
   const key = JSON.stringify([p.id, file ? file.id : launch.session]);
   const cached = terminalView.key === key ? terminalView : {};
   return `<section class="loop-console" data-console-key="${esc(key)}" data-project="${esc(p.id)}" data-agent="${esc(launch?.agent || "")}" data-session="${esc(launch?.session || "")}" data-file="${file ? "1" : ""}">
-    <div class="row"><h2>Terminal · ${esc(file ? file.handle.name : launch.agent)}</h2>
+    <div class="row"><h2>Terminal · ${esc(file ? file.handle.name : launch.agent)} ${!file ? runInfoButton(p, launch.agent, launch.session, round?.session === launch.session ? round.number : 1) : ""}</h2>
     ${file ? '<button class="btn small ghost" data-detach-log>Detach</button>' : ""}</div>
     <div class="sub" data-console-info>${esc(cached.info || "Connecting…")}</div>
     <pre class="loop-output" data-console-text data-keep="${esc("terminal:" + key)}" data-tail tabindex="0" aria-label="Terminal output">${esc(cached.text || "")}</pre></section>`;
@@ -973,7 +1040,10 @@ function liveLoop(p) {
     <div>${esc(u.title)}</div>${u.detail && u.detail !== u.title ? `<p>${esc(u.detail)}</p>` : ""}
     ${u !== focus && facts(u) ? `<dl class="kv">${facts(u)}</dl>` : ""}</div></li>`;
   const logKey = `loop-log:${p.id}:${round.key}`;
-  return heading + terminalPanel(p, round) + `<article class="loop-work"><header><p class="sub">${esc(round.agent)} · Iteration ${esc(round.number)} · ${esc(status(round))}</p>
+  const launch = terminalLaunch(p, round), terminal = terminalPanel(p, round, launch);
+  const infoInTerminal = launch && launch.session === round.session && (pinnedRounds.has(p.id) || !attachedLogs.has(p.id));
+  const info = infoInTerminal ? "" : runInfoButton(p, round.agent, round.session, round.number);
+  return heading + terminal + `<article class="loop-work"><header><p class="sub">${esc(round.agent)} · Iteration ${esc(round.number)} · ${esc(status(round))} ${info}</p>
     <h2>${round.handoff ? (round.apiError ? "Harness error" : round.hasHandoff ? "Round handoff" : "Final output") : focus ? esc(subject(round)) : "Awaiting final output"}</h2></header>
     ${round.handoff ? `<div class="md">${md(round.handoff)}</div>` : ""}
     ${details ? `<dl class="kv">${details}</dl>` : ""}
@@ -1473,7 +1543,8 @@ $("#proj").addEventListener("change", e => { location.hash = "#/" + encodeURICom
 document.addEventListener("click", async e => {
   const b = e.target.closest("button");
   if (!b) return;
-  if (b.hasAttribute("data-attach-log")) {
+  if (b.hasAttribute("data-run-info")) { showRunInfo(b); }
+  else if (b.hasAttribute("data-attach-log")) {
     const { p } = route();
     try {
       const [handle] = await window.showOpenFilePicker({multiple: false});

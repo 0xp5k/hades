@@ -20,6 +20,9 @@ Environment: PROJECT_VIEW_URL (default http://127.0.0.1:8765), PROJECT_VIEW_TOKE
 import argparse
 import codecs
 import socket
+import shlex
+import shutil
+import sqlite3
 import json
 import os
 import subprocess
@@ -31,6 +34,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
+from pathlib import Path
 
 URL = os.environ.get("PROJECT_VIEW_URL", "http://127.0.0.1:8765").rstrip("/")
 
@@ -52,9 +56,84 @@ def say(a, text):
         pass  # the server being briefly away must not stop the loop
 
 
-def run_harness(args, brief, timeout):
+def cli_name(program):
+    name = Path(program).name.lower()
+    return name.split(".")[0] if name in ("codex", "claude", "codex.exe", "claude.exe", "codex.cmd", "claude.cmd") else ""
+
+
+def record_input(env, stage, argv, payload, source="Captured at launch"):
+    db = env.get("HADES_DETAILS_DB")
+    if not db:
+        return
+    try:
+        path = Path(db)
+        path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+        os.close(os.open(path, os.O_WRONLY | os.O_CREAT, 0o600))
+        conn = sqlite3.connect(path, timeout=2)
+        try:
+            conn.execute("""CREATE TABLE IF NOT EXISTS invocation
+                (project TEXT, agent TEXT, session TEXT, round INTEGER, stage TEXT,
+                 argv TEXT, command TEXT, stdin BLOB, source TEXT)""")
+            conn.execute("INSERT INTO invocation VALUES (?,?,?,?,?,?,?,?,?)", (
+                env["HADES_DETAILS_PROJECT"], env["HADES_DETAILS_AGENT"], env["HADES_LAUNCH_SESSION"],
+                int(env["HADES_DETAILS_ROUND"]), stage, json.dumps(argv),
+                subprocess.list2cmdline(argv) if os.name == "nt" else shlex.join(argv), payload, source))
+            conn.commit()
+        finally:
+            conn.close()
+    except (OSError, sqlite3.Error, KeyError, ValueError) as error:
+        print(f"[loop] Run details unavailable: {error}", file=sys.stderr, flush=True)
+
+
+def forward_cli(argv):
+    """Forward a batch invocation after the wrapper has finished composing its input."""
+    env = os.environ.copy()
+    if "HADES_ORIGINAL_PATH" in env:
+        env["PATH"] = env.pop("HADES_ORIGINAL_PATH")
+    if sys.stdin.isatty():
+        # Interactive input cannot be snapshotted before launch.
+        return subprocess.call(argv, env=env)
+    payload = sys.stdin.buffer.read()
+    record_input(env, "cli", argv, payload)
+    # Inherit ordinary output descriptors, including the existing live terminal.
+    if os.name != "nt":
+        with tempfile.TemporaryFile() as stream:
+            stream.write(payload)
+            stream.seek(0)
+            os.dup2(stream.fileno(), 0, inheritable=True)
+            os.execvpe(argv[0], argv, env)
+    return subprocess.run(argv, input=payload, env=env).returncode
+
+
+def launch_env(a, n, argv, directory):
+    env = os.environ.copy()
+    if not env.get("HADES_DETAILS_DB"):
+        return env
+    env.update(HADES_DETAILS_PROJECT=a.project, HADES_DETAILS_AGENT=a.agent,
+               HADES_DETAILS_ROUND=str(n), HADES_LAUNCH_SESSION=a.session)
+    direct = cli_name(argv[0])
+    if not direct:
+        helper = str(Path(__file__).resolve())
+        env["HADES_CAPTURE_CLI"] = helper
+        if os.name == "posix":
+            original = env.get("PATH", os.defpath)
+            for name in ("claude", "codex"):
+                program = shutil.which(name, path=original)
+                if program:
+                    shim = Path(directory) / name
+                    prefix = shlex.join([sys.executable, helper, "--capture-cli", program])
+                    shim.write_text('#!/bin/sh\nexec ' + prefix + ' "$@"\n', encoding="utf-8")
+                    shim.chmod(0o700)
+            env["HADES_ORIGINAL_PATH"] = original
+            env["PATH"] = directory + os.pathsep + original
+    return env
+
+
+def run_harness(args, brief, timeout, env=None):
     """Run one round. Shows the harness's output as it arrives and also returns it. Returns (exit code or reason, output)."""
-    proc = subprocess.Popen(args, stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+    proc = subprocess.Popen(args, stdin=subprocess.PIPE, stdout=subprocess.PIPE, env=env)
+    if env is not None:
+        record_input(env, "cli" if cli_name(args[0]) else "wrapper", args, brief.encode("utf-8"))
     timed_out = threading.Event()
     timer = threading.Timer(timeout, lambda: (timed_out.set(), proc.kill()))
     timer.start()
@@ -142,7 +221,10 @@ def main():
             f.write(brief)
         say(a, f"Iteration {n} started")
         try:
-            code, output = run_harness([part.replace("{brief_file}", f.name).replace("{brief}", brief) for part in command], brief, a.timeout_min * 60)
+            argv = [part.replace("{brief_file}", f.name).replace("{brief}", brief) for part in command]
+            with tempfile.TemporaryDirectory(prefix="hades-launch-") as directory:
+                env = launch_env(a, n, argv, directory)
+                code, output = run_harness(argv, brief, a.timeout_min * 60, env)
         except OSError as e:
             return say(a, f"Loop stopped: could not start the harness ({e})")
         finally:
@@ -171,6 +253,8 @@ def main():
 
 if __name__ == "__main__":
     try:
+        if sys.argv[1:2] == ["--capture-cli"]:
+            sys.exit(forward_cli(sys.argv[2:]))
         main()
     except KeyboardInterrupt:
         print("\n[loop] stopped by Ctrl-C")

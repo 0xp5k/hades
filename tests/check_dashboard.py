@@ -49,7 +49,18 @@ def check(directory):
                 assert b'id="view"' in page.read()
             with urlopen(base + "/AGENTS.md", timeout=3) as guide:
                 assert b"topic" in guide.read()
+            route = "/api/run-details?project=workspace&agent=fixture&session=sample&round="
+            prompt = "\nReview Ω\r\n$HOME 'literal' <tag>\n"
             if first:
+                env = {**os.environ, "HADES_DETAILS_DB": str(Path(directory) / "agent-work/.hades/invocations.sqlite3"),
+                       "HADES_DETAILS_PROJECT": "workspace", "HADES_DETAILS_AGENT": "fixture",
+                       "HADES_LAUNCH_SESSION": "sample", "HADES_DETAILS_ROUND": "1"}
+                command = [sys.executable, "-c", "import sys; sys.stdout.buffer.write(sys.stdin.buffer.read())"]
+                forwarded = subprocess.run([sys.executable, str(ROOT / "scripts/loop.py"), "--capture-cli", *command],
+                                           env=env, input=prompt.encode(), stdout=subprocess.PIPE, check=True)
+                assert forwarded.stdout == prompt.encode()
+                assert get(route + "1")[0]["argv"] == command
+                assert get(route + "2") == []
                 claim = {"project": "workspace", "type": "item", "section": "experiments",
                          "key": "Sample", "status": "rce", "revision": "forged"}
                 saved = get("/api/events", claim)
@@ -72,6 +83,7 @@ def check(directory):
                 assert get(f"/api/events?project=workspace&after={count}")["events"][0]["body"] == message
             else:
                 assert get("/api/events?project=workspace")["events"][-1]["body"] == message
+            assert get(route + "1")[0]["stdin"] == prompt
         finally:
             proc.terminate()
             proc.wait(timeout=10)

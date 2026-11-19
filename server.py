@@ -38,6 +38,7 @@ import os
 import re
 import shutil
 import signal
+import sqlite3
 import subprocess
 import sys
 import threading
@@ -560,6 +561,24 @@ def console_tail(project, agent, session):
         return {"text": data.decode("utf-8", errors="replace"), "clipped": start > record["start_offset"]}
 
 
+def run_details(project, agent, session, number):
+    path = ROOT / "agent-work" / ".hades" / "invocations.sqlite3"
+    if not path.exists():
+        return []
+    conn = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)
+    try:
+        if not conn.execute("SELECT 1 FROM sqlite_master WHERE name='invocation'").fetchone():
+            return []
+        rows = conn.execute("""SELECT stage, argv, command, stdin, source FROM invocation
+            WHERE project=? AND agent=? AND session=? AND round=? ORDER BY rowid""",
+            (project, agent, session, number))
+        return [{"stage": stage, "argv": json.loads(argv), "command": command,
+                 "stdin": payload.decode("utf-8", errors="backslashreplace"), "source": source}
+                for stage, argv, command, payload, source in rows]
+    finally:
+        conn.close()
+
+
 def launch(data):
     project, wanted = check_name(data.get("project")), recipes()
     if not (PROJECTS / project).is_dir():
@@ -597,6 +616,7 @@ def launch(data):
                        "--max-iterations", str(rounds), "--timeout-min", str(recipe.get("timeout_min", 10)), "--"] + recipe["command"]
             session = uuid.uuid4().hex
             env["HADES_LAUNCH_SESSION"] = session
+            env["HADES_DETAILS_DB"] = str((ROOT / "agent-work" / ".hades" / "invocations.sqlite3").resolve())
             with open(work / "loop.log", "ab") as log:
                 console = open(work / "loop.log", "rb")
                 try:
@@ -1352,10 +1372,12 @@ class Handler(BaseHTTPRequestHandler):
                 # epoch changes on every server start, so an open page knows to refetch instead of mixing two logs
                 self.reply(200, [{"id": p, "config": public_config(p), "count": len(load(p)), "epoch": BOOT, "experimentChecks": experiment_checks(p), "hold": hold(p), "notable": notable(p), "working": sorted(a for a, t in SLOTS.get(p, {}).items() if t > time.time()),
                                   "launched": launched(p), "recipes": {k: v.get("label", k) for k, v in recipes().items()}} for p in project_ids()])
-            elif url.path == "/api/terminal":
+            elif url.path in ("/api/terminal", "/api/run-details"):
                 host = urlparse(self.base()).hostname
                 if self.client_address[0] not in LOCAL or host not in (*LOCAL, "localhost"):
                     return self.reply(403, {"error": "Terminal output is available on localhost."})
+                if url.path == "/api/run-details":
+                    return self.reply(200, run_details(arg("project"), arg("agent"), arg("session"), int(arg("round") or 0)))
                 tail = console_tail(arg("project"), arg("agent"), arg("session"))
                 self.reply(200 if tail is not None else 404, tail or {"error": "No attached terminal."})
             elif url.path == "/api/events":
