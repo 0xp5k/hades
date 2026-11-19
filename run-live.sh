@@ -26,6 +26,6 @@ if seed and Path(seed).is_dir():
 EOF
 fi
 cd "$WORK" || exit 1
-exec python3 "$ROOT/loop.py" "$1" --agent "$AGENT" --harness "Claude Code" \
+exec python3 "$ROOT/scripts/loop.py" "$1" --agent "$AGENT" --harness "Claude Code" \
   --max-iterations "${2:-2}" --timeout-min 10 \
   -- claude -p --model "${MODEL:-sonnet}" --allowedTools "Bash(curl:*)" "Bash(python3:*)" "Read" "Write" "Edit"

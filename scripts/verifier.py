@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """The verifier: re-scores every run itself, so the page never has to trust an agent's own number.
 
-  python3 verifier.py
+  python3 scripts/verifier.py
 
 For each run without a verdict, it runs the project's scoring command (metric.verify in the local
 project.json), feeds the run's artifact to it on stdin, and posts what the command says.
@@ -32,7 +32,7 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-PROJECTS = Path(__file__).parent / "projects"
+PROJECTS = Path(__file__).resolve().parents[1] / "projects"
 TIMEOUT = 20
 BATCH = 50  # the most runs the server hands over per request
 

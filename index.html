@@ -729,7 +729,7 @@ const views = {
       } else if (!started) {
         h += `<h2>Next: start a survey agent</h2><div class="sub">It will study the target, write this page so you can learn the target too, and propose how the project should run. Run this where the target lives, with your own harness command after the <code>--</code>.</div>
           <div class="row mt2"><span></span><button class="btn small ghost" data-copy="survey" data-fk="copy:survey">Copy</button></div>
-          <pre id="copy-survey">${esc(`export PROJECT_VIEW_URL=${location.origin}\npython3 loop.py ${p.id} --agent survey-1 -- claude -p`)}</pre>`;
+          <pre id="copy-survey">${esc(`export PROJECT_VIEW_URL=${location.origin}\npython3 scripts/loop.py ${p.id} --agent survey-1 -- claude -p`)}</pre>`;
       } else {
         h += `<h2>The survey agent is working</h2><div class="sub">${d.lastProposal && d.lastProposal.status === "returned" ? "You sent its last proposal back. A revised one will appear here." : "Topics appear below as it writes them. Its proposal for how to run the project will appear here when it is ready."}
           You can already read, flag and ask questions.</div>`;

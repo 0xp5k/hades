@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Run Hades with two live demo projects, so there is something real to look at.
 
-  python3 demo.py
+  python3 demo/run.py
 
   lr-schedule-search   AI research. Agents hill-climb a learning-rate schedule; the verifier retrains to check.
   parser-fuzz          Security. Agents fuzz a toy parser; the verifier replays each crash to check.
@@ -24,11 +24,12 @@ import threading
 import time
 import urllib.request
 from collections import Counter
+from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import server
-import verifier
+from scripts import verifier
 
-sys.path.insert(0, str(server.ROOT / "demo"))
 import fuzz_target  # noqa: E402
 import lr_score  # noqa: E402
 

@@ -535,7 +535,7 @@ def launch(data):
                 shutil.copytree(seed, work, dirs_exist_ok=True)
             env = {k: v for k, v in os.environ.items() if k not in ("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT")}
             env["PROJECT_VIEW_URL"] = f"http://127.0.0.1:{PORT}"
-            command = [sys.executable, str(ROOT / "loop.py"), project, "--agent", agent, "--harness", str(recipe.get("label") or name),
+            command = [sys.executable, str(ROOT / "scripts" / "loop.py"), project, "--agent", agent, "--harness", str(recipe.get("label") or name),
                        "--max-iterations", str(rounds), "--timeout-min", str(recipe.get("timeout_min", 10)), "--"] + recipe["command"]
             log = open(work / "loop.log", "a")
             proc = subprocess.Popen(command, cwd=work, env=env, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)

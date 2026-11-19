@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """Report one event to Hades from any harness, on any machine. Needs only Python.
 
-  python3 emit.py <project> activity "Training for 5 minutes"
-  python3 emit.py <project> run      "Cosine, peak 0.3" --score 0.41 --artifact '{"peak": 0.3}'
-  python3 emit.py <project> finding  "Warmup matters most" --body "Longer explanation..."
-  python3 emit.py <project> question "Does this hold at larger batch size?"
-  python3 emit.py <project> item     "Swept 2% to 15%" --section coverage --key "Warmup length" --status explored
-  python3 emit.py <project> task     "Sweep warmup length" --status queued
-  python3 emit.py <project> tool     Bash --ok --ms 1200
+  python3 scripts/emit.py <project> activity "Training for 5 minutes"
+  python3 scripts/emit.py <project> run      "Cosine, peak 0.3" --score 0.41 --artifact '{"peak": 0.3}'
+  python3 scripts/emit.py <project> finding  "Warmup matters most" --body "Longer explanation..."
+  python3 scripts/emit.py <project> question "Does this hold at larger batch size?"
+  python3 scripts/emit.py <project> item     "Swept 2% to 15%" --section coverage --key "Warmup length" --status explored
+  python3 scripts/emit.py <project> task     "Sweep warmup length" --status queued
+  python3 scripts/emit.py <project> tool     Bash --ok --ms 1200
 
 Environment:
   PROJECT_VIEW_URL    where the server is (default http://127.0.0.1:8765)

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Run any harness against a project, nonstop. This one file is all a VM needs besides the harness.
 
-  python3 loop.py my-project --agent vm-1/claude -- claude -p
-  python3 loop.py my-project --agent vm-2/other  -- my-harness --prompt-file {brief_file}
+  python3 scripts/loop.py my-project --agent vm-1/claude -- claude -p
+  python3 scripts/loop.py my-project --agent vm-2/other  -- my-harness --prompt-file {brief_file}
 
 Each iteration starts the harness fresh, with the project's current brief as its prompt:
   1. Stop if a limit is reached or a file named STOP exists here. Wait while the project is on hold (paused, or waiting on the person).

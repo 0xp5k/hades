@@ -3,7 +3,7 @@
 ## Start it
 
     git clone https://github.com/0xp5k/hades && cd hades
-    python3 hades.py
+    python3 scripts/hades.py
 
 That one command checks the install (eleven checks, about five seconds, no model needed), starts the page and the verifier
 together and opens http://127.0.0.1:8765. An empty workspace starts with a practice project.
@@ -14,13 +14,13 @@ Or have an assistant do it. Open Claude Code, or any coding agent, in this folde
 
 Other ways in:
 
-    python3 hades.py check   # only the check; exits 0 if everything works
-    python3 demo.py          # three demo projects with simulated agents, to look around without any model
+    python3 scripts/hades.py check   # only the check; exits 0 if everything works
+    python3 demo/run.py          # three demo projects with simulated agents, to look around without any model
     python3 server.py        # the page on its own, when the verifier runs somewhere else
 
 ## Try it on the practice project
 
-In an existing workspace you can add the practice project with `python3 hades.py new tinyvm practice`.
+In an existing workspace you can add the practice project with `python3 scripts/hades.py new tinyvm practice`.
 It contains a small interpreter with 17 planted defects and a hidden answer key. Start an agent whichever way you like:
 
     sh run-live.sh practice 3        # in another terminal: one Claude Code agent, three rounds
@@ -36,7 +36,7 @@ In our own runs Claude Code agents found all 17 in under six minutes. They have 
 
 Two harder targets are included:
 
-    python3 hades.py new stdlib      # 25 real parsers from Python's standard library; no answer key
+    python3 scripts/hades.py new stdlib      # 25 real parsers from Python's standard library; no answer key
 
 - **`stdlib`** is a real target: property lists, tar and zip archives, email, time zone files, TOML and twenty more. A
   defect is an input that makes a parser fail with an error it should not raise for bad input. Nobody knows how many
@@ -55,12 +55,12 @@ that. For a measurement you care about, move `toys/*/answer_key.py` off the mach
 3. Read the proposal, including the whole scoring script, then approve it or send it back with comments.
 4. Start agents. Each round they get a fresh brief: the routine to follow plus where things stand right now.
 
-    python3 loop.py my-project --agent a-1 -- claude -p   # everything after -- is your own harness command
+    python3 scripts/loop.py my-project --agent a-1 -- claude -p   # everything after -- is your own harness command
 
-`python3 hades.py` already runs the verifier. If you started `server.py` on its own, run `python3 verifier.py` too, and
+`python3 scripts/hades.py` already runs the verifier. If you started `server.py` on its own, run `python3 scripts/verifier.py` too, and
 keep it where agents cannot write.
 
-`loop.py` works with any harness that takes a prompt on standard input or as a file (`{brief_file}`).
+`scripts/loop.py` works with any harness that takes a prompt on standard input or as a file (`{brief_file}`).
 `run-live.sh` is a ready-made wrapper for Claude Code; `check-harness.sh` tries Codex or OhMyPi for one round.
 
 ## Run it by talking to an agent
@@ -80,10 +80,10 @@ The coordinator cannot approve a setup proposal or answer agents' questions for 
 
 A person has asked you to get Hades running on this machine. Do this, in order:
 
-1. Run `python3 hades.py check`. If any line says FAIL, stop and show the person that output.
+1. Run `python3 scripts/hades.py check`. If any line says FAIL, stop and show the person that output.
 2. Ask the person one question: may the page, and you, start agents on this machine? Saying yes lets the server run the
    agent command in `launchers.example.json`, and nothing else.
-3. Start the server in the background, because it does not exit: `python3 hades.py --skip-check --no-open`, adding
+3. Start the server in the background, because it does not exit: `python3 scripts/hades.py --skip-check --no-open`, adding
    `--allow-launch` only if they said yes.
 4. Read `http://127.0.0.1:8765/api/coordinator` and follow it. It lists your tools and the rules.
 5. Tell the person to open http://127.0.0.1:8765. If the workspace includes `practice`, offer to start one agent there. Starting
@@ -91,7 +91,7 @@ A person has asked you to get Hades running on this machine. Do this, in order:
 
 ## Starting agents from the server
 
-Off by default. `python3 hades.py --allow-launch` switches it on for Claude Code; or copy `launchers.example.json` to
+Off by default. `python3 scripts/hades.py --allow-launch` switches it on for Claude Code; or copy `launchers.example.json` to
 `launchers.json` yourself and edit the command for your harness. Each entry is a
 named recipe that the coordinator or launch API can start and stop. Launched agents work in
 `agent-work/<project>/<agent>/`, where `loop.log` holds each one's output. A project can name a folder (`agent_files`)
@@ -134,7 +134,7 @@ each thread shows its attributed updates. `/api/research` returns the current st
 
 ## Running in a VM
 
-Copy this folder in and run `python3 hades.py --no-open`. Agents on the same machine reach it at `127.0.0.1:8765` with no token.
+Copy this folder in and run `python3 scripts/hades.py --no-open`. Agents on the same machine reach it at `127.0.0.1:8765` with no token.
 
 To take reports from other machines:
 
@@ -156,13 +156,13 @@ each machine that runs agents. Hades only starts agents if you create `launchers
 
 | File | What it is |
 |---|---|
-| `hades.py` | The front door: checks the install, then runs the server and the verifier together |
+| `scripts/hades.py` | The front door: checks the install, then runs the server and the verifier together |
 | `server.py` | The server: storage, briefs, tasks, slots, setup and approval |
 | `index.html` | The whole page |
-| `verifier.py` | Re-scores results with each project's scoring command |
-| `loop.py` | Runs any harness in rounds; this one file is all an agent machine needs |
-| `emit.py` | Report one event from a shell script |
-| `demo.py`, `demo/` | Demo projects with simulated agents and real scoring |
+| `scripts/verifier.py` | Re-scores results with each project's scoring command |
+| `scripts/loop.py` | Runs any harness in rounds; this one file is all an agent machine needs |
+| `scripts/emit.py` | Report one event from a shell script |
+| `demo/run.py`, `demo/` | Demo projects with simulated agents and real scoring |
 | `toys/` | Ready-made targets. `tinyvm` (the `practice` project) and `blackbox` have hidden answer keys; `stdlib` is real code with none. **The answer keys are spoilers: keep them away from agents.** |
 | `projects/` | Your projects' data. Not in version control |
 

@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """The front door. One command checks this install and runs everything a single machine needs.
 
-  python3 hades.py          check the install, then open your projects (first-time users start with practice)
-  python3 hades.py check    only check that this install works: a few seconds, no model needed, nothing left behind
-  python3 hades.py new <target> [name]   add a ready-made project from toys/: "tinyvm" (17 planted defects),
+  python3 scripts/hades.py          check the install, then open your projects (first-time users start with practice)
+  python3 scripts/hades.py check    only check that this install works: a few seconds, no model needed, nothing left behind
+  python3 scripts/hades.py new <target> [name]   add a ready-made project from toys/: "tinyvm" (17 planted defects),
                             or "stdlib" (25 real parsers from Python's standard library, no answer key)
 
 Options for the first form:
@@ -35,6 +35,7 @@ from pathlib import Path
 if sys.version_info < (3, 8):
     sys.exit("Hades needs Python 3.8 or newer; this is Python " + sys.version.split()[0])
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import server  # noqa: E402
 import verifier  # noqa: E402
 
@@ -141,7 +142,7 @@ def check():
 
     def loop():
         stand_in = [sys.executable, "-c", "import sys; print('Stand-in harness read a brief of', len(sys.stdin.read()), 'characters')"]
-        done = subprocess.run([sys.executable, str(server.ROOT / "loop.py"), PRACTICE, "--agent", "self-check-loop", "--max-iterations", "1", "--pause", "0", "--"] + stand_in,
+        done = subprocess.run([sys.executable, str(server.ROOT / "scripts" / "loop.py"), PRACTICE, "--agent", "self-check-loop", "--max-iterations", "1", "--pause", "0", "--"] + stand_in,
                               env={**os.environ, "PROJECT_VIEW_URL": url}, cwd=tmp, capture_output=True, text=True, timeout=60)
         need(done.returncode == 0, f"loop.py exited with {done.returncode}: {(done.stdout + done.stderr)[-300:]}")
         notes = [e for e in http(f"/api/events?project={PRACTICE}")["events"] if e.get("section") == "round-notes" and "Stand-in harness" in e.get("body", "")]
@@ -237,7 +238,7 @@ def main(argv):
     if argv[:1] == ["new"]:
         toys = sorted(d.name for d in (server.ROOT / "toys").iterdir() if (d / "project.json").exists())
         if len(argv) not in (2, 3) or argv[1] not in toys:
-            sys.exit("usage: python3 hades.py new <target> [project-name]     targets: " + ", ".join(toys))
+            sys.exit("usage: python3 scripts/hades.py new <target> [project-name]     targets: " + ", ".join(toys))
         name = argv[2] if len(argv) == 3 else argv[1]
         try:
             created = make(server.check_name(name), argv[1])
