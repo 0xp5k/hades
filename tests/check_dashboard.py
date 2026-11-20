@@ -77,7 +77,7 @@ sys.exit(0 if sys.stdin.read() == "" else 3)
         inbox.live = False
         for m in messages:
             inbox.put(m)
-        screen = io.TextIOWrapper(io.BytesIO(), encoding="utf-8", write_through=True)
+        screen = io.TextIOWrapper(io.BytesIO(), newline="\n", encoding="utf-8", write_through=True)
         with patch.object(loop, "call", lambda path, body=None: None), patch.object(loop, "EXIT_WAIT", 1), \
                 patch.object(loop.sys, "stdout", screen):
             result = loop.run_conversation([sys.executable, "-u", "-c", source], "the brief", timeout, None, inbox, reply_wait)
@@ -93,7 +93,7 @@ sys.exit(0 if sys.stdin.read() == "" else 3)
     inbox = queue.Queue()
     inbox.live = False
     inbox.put("Check the résumé parser")
-    screen = io.TextIOWrapper(io.BytesIO(), encoding="utf-8", write_through=True)
+    screen = io.TextIOWrapper(io.BytesIO(), newline="\n", encoding="utf-8", write_through=True)
     with patch.object(loop.Screen, "line", reply), patch.object(loop.sys, "stdout", screen):
         code, output, stats = loop.run_conversation([sys.executable, "-u", "-c", child], "the brief", 30, None, inbox, 5)
     shown = screen.buffer.getvalue().decode("utf-8")
@@ -135,7 +135,7 @@ sys.exit(0 if sys.stdin.read() == "" else 3)
     assert code == 0 and stats["messages"] == 1 and "Reply within" not in shown and time.time() - clock < 4, (code, shown)
     # A time limit of 0 means none: a round outlasts what a short limit would have allowed.
     slow = "import time; time.sleep(1.5); print('Handoff: slow')"
-    with patch.object(loop.sys, "stdout", io.TextIOWrapper(io.BytesIO())):
+    with patch.object(loop.sys, "stdout", io.TextIOWrapper(io.BytesIO(), newline="\n")):
         assert loop.run_harness([sys.executable, "-c", slow], "b", 0) == (0, "Handoff: slow\n")
     code, output, *_ = converse(head + 'import time; sys.stdin.readline(); time.sleep(1.5); done("Handoff: slow"); '
                                 'sys.exit(0 if sys.stdin.read() == "" else 3)', timeout=0)
@@ -159,7 +159,7 @@ sys.exit(0 if sys.stdin.read() == "" else 3)
                    "sys.argv = ['loop.py', 'p', '--no-notes'] + sys.argv[2:]\nloop.main()")
     bystander = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])  # never the loop's to end
     with tempfile.TemporaryDirectory() as work:
-        pids, strays, quiet = Path(work) / "pids", [], io.TextIOWrapper(io.BytesIO())
+        pids, strays, quiet = Path(work) / "pids", [], io.TextIOWrapper(io.BytesIO(), newline="\n")
 
         def taken():  # the pids the fixtures wrote, collected for cleanup
             found = list(map(int, pids.read_text().split()))
@@ -182,7 +182,7 @@ sys.exit(0 if sys.stdin.read() == "" else 3)
 
             # --keep-background: what a round started keeps running between rounds, even while holding the output open
             # (round 2 checks round 1's process is alive), the next round starts promptly, and all of it ends with the loop.
-            shown = io.TextIOWrapper(io.BytesIO(), encoding="utf-8", write_through=True)
+            shown = io.TextIOWrapper(io.BytesIO(), newline="\n", encoding="utf-8", write_through=True)
             keeper = ALIVE + (f"import subprocess, sys; p = {str(pids)!r}\n"
                               "for pid in (open(p).read().split() if os.path.exists(p) else []): assert alive(int(pid)), pid\n"
                               "g = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'], stdout=sys.stdout)\n"
@@ -273,7 +273,7 @@ sys.exit(0 if sys.stdin.read() == "" else 3)
             with patch.dict(os.environ, {"PATH": folder + os.pathsep + os.environ["PATH"]}):
                 command = loop.resolve(["claude", "-p"])
             assert command[0].lower().endswith("claude.cmd") and loop.can_converse(command), command
-            with patch.object(loop.sys, "stdout", io.TextIOWrapper(io.BytesIO())):
+            with patch.object(loop.sys, "stdout", io.TextIOWrapper(io.BytesIO(), newline="\n")):
                 code, output = loop.run_harness(command, "the brief", 30)
             assert code == 0 and output.strip() == "Handoff: the brief", (code, output)
         print("Skipped on Windows: Ctrl-Break and a console's standard input need an interactive console, which CI lacks.")
@@ -303,7 +303,7 @@ sys.exit(0 if sys.stdin.read() == "" else 3)
             before = loop.fingerprint(["checker/**", "verify.py", "link.py", "../outside.py"])
             assert sorted(before) == ["checker/check.py", "verify.py"], before
             with patch.object(loop, "call", server), patch.object(loop.time, "sleep", lambda s: None), \
-                    patch.object(loop.sys, "stdout", io.TextIOWrapper(io.BytesIO(), encoding="utf-8")), \
+                    patch.object(loop.sys, "stdout", io.TextIOWrapper(io.BytesIO(), newline="\n", encoding="utf-8")), \
                     patch.object(loop.sys, "argv", ["loop.py", "p", "--agent", "a", "--max-iterations", "2", "--no-notes", "--",
                                                     sys.executable, "-c", edit, "brief\n\n" + loop.HANDOFF]):
                 loop.main()
