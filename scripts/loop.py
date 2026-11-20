@@ -410,7 +410,8 @@ def run_harness(args, brief, timeout, env=None, keep=False):
     tail = (tail + decoder.decode(b"", final=True))[-6000:]
     code = proc.wait()
     finish_round(family, keep, timed_out.is_set())
-    return (f"timeout after {timeout / 60:g} min" if timed_out.is_set() else code), tail
+    # Windows programs end lines with \r\n; the saved note uses plain newlines everywhere
+    return (f"timeout after {timeout / 60:g} min" if timed_out.is_set() else code), tail.replace("\r\n", "\n")
 
 
 STREAM = ["--input-format", "stream-json", "--output-format", "stream-json", "--include-partial-messages", "--verbose"]
@@ -653,7 +654,7 @@ def run_conversation(args, brief, timeout, env, inbox, reply_wait=120, keep=Fals
     if "cost_usd" in stats:
         stats["cost_usd"] = round(stats["cost_usd"], 6)
     outcome = state["reason"] or code or (1 if failed else 0 if results else "exited without a result")
-    return outcome, "\n\n".join(r for r in replies if r) or screen.tail, stats
+    return outcome, ("\n\n".join(r for r in replies if r) or screen.tail).replace("\r\n", "\n"), stats
 
 
 def fingerprint(patterns, limit=2000, large=20 << 20):
