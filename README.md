@@ -2,22 +2,28 @@
 
 # Hades
 
-Hades is a live project page for work you do with Claude or Codex. Give the agent direction in chat. Open the page to see what it found, what’s still open, and the evidence behind an update.
+Hades runs Claude round after round on a research question and shows what it found, what it ruled out and what is still open. You steer it from the page while it works.
 
 ## Run locally
 
-Clone the repo and open its folder. The dashboard uses Python 3 and its standard library.
+You need Python 3 and, to start agents, [Claude Code](https://docs.anthropic.com/en/docs/claude-code). Nothing else to install.
 
 ```sh
 git clone https://github.com/0xp5k/hades
 cd hades
 ```
 
-| Platform | Start the dashboard |
+| Platform | Start Hades |
 | --- | --- |
-| Windows | `py -3 server.py --dashboard` |
-| Linux or macOS | `python3 server.py --dashboard` |
+| Windows | `py -3 scripts\hades.py` |
+| Linux or macOS | `python3 scripts/hades.py` |
 
-Open [Hades on localhost](http://127.0.0.1:8765/). In a chat that knows your Hades project, ask “Explain how this works.” The agent can add or update a page in **More → Library** and give you its link. From another workspace, give the agent the project URL once. The dashboard links to its reporting instructions and refreshes as the agent saves updates. Your project records stay on your machine.
+1. Answer yes when it asks to allow the Start button. The page then opens.
+2. Type what to research, then press **Start**.
+3. Watch Claude work in **Live loop**. Type there to steer it, and read what it found on the project brief.
+
+Rounds have no time limit. In the loop settings you can pick the model, choose **explore** to let Claude follow its nose, and run up to five workers at once. It runs the same way on Windows, macOS and Linux.
+
+Your project records stay on your machine.
 
 [Full guide](docs/guide.md) · [Agent reporting instructions](AGENTS.md)

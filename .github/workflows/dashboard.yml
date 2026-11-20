@@ -14,3 +14,4 @@ jobs:
         with:
           python-version: "3.12"
       - run: python tests/check_dashboard.py
+      - run: python tests/check_research.py

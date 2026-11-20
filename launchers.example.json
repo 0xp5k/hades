@@ -1,8 +1,25 @@
 {
-  "claude-sonnet": {
-    "label": "Claude Code (Sonnet)",
-    "command": ["claude", "-p", "--model", "sonnet", "--allowedTools", "Bash(curl:*)", "Bash(python3:*)", "Read", "Write", "Edit"],
-    "rounds": 4,
-    "timeout_min": 10
+  "claude": {
+    "label": "Claude Code",
+    "command": [
+      "claude",
+      "-p",
+      "--model",
+      "opus",
+      "--allowedTools",
+      "Bash",
+      "Read",
+      "Write",
+      "Edit",
+      "Glob",
+      "Grep"
+    ],
+    "models": [
+      "fable",
+      "opus",
+      "sonnet",
+      "haiku"
+    ],
+    "rounds": 4
   }
 }

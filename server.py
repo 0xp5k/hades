@@ -13,15 +13,16 @@ What a harness can call (from another machine, send "Authorization: Bearer <toke
   POST /api/events   {"project", "type", "text", "agent", ...}   report anything
   POST /api/claim    {"project", "agent"}                        take the oldest queued task, or null
   POST /api/slot     {"project", "agent"}                        ask to start a round; honours the project's limit on agents at once
-  POST /api/project  {"project", "goal", "section": {...}}       set the goal or add a section
+  POST /api/project  {"project", "goal", "section": {...}}       set the goal or add a section ("direction": this machine only)
   GET  /api/project?project=X                                    read the project's config
   GET  /api/brief?project=X&agent=NAME                           plain-text instructions plus current state
   GET  /api/runs?project=X&agent=NAME                            that agent's runs with the verifier's decision
   GET  /api/found?project=X                                      what is confirmed and what is awaiting the verifier
   GET  /api/coordinator                                           plain-text guide for a chat agent that will run this server for you
   POST /api/coordinate {"tool", "args"}                            the coordinator's tools without MCP (this machine or coordinator)
-  POST /api/launch   {"project", "recipe", "count", "rounds"}     start agents from a recipe in launchers.json (this machine or coordinator)
+  POST /api/launch   {"project", "recipe", "count", "rounds", "model"}  start agents from a recipe in launchers.json (this machine or coordinator)
   POST /api/stop     {"project", "agent"}                         stop launched agents
+  POST /api/terminal/send {"project", "agent", "session", "text"}  message a launched Claude worker (the page on this machine only)
   POST /mcp                                                     the same as MCP tools
 
 Trust: requests from this machine are fully trusted. Remote writers need PROJECT_VIEW_TOKEN.
@@ -36,6 +37,7 @@ import hmac
 import json
 import os
 import re
+import select
 import shutil
 import signal
 import sqlite3
@@ -49,8 +51,6 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from scripts import review
-
 ROOT = Path(__file__).parent
 PROJECTS = ROOT / "projects"
 PORT = int(os.environ.get("PROJECT_VIEW_PORT", 8765))
@@ -62,7 +62,7 @@ LOCK = threading.RLock()
 NAME = re.compile(r"^\w[\w.-]{0,79}$")
 TYPES = ["activity", "run", "verdict", "finding", "question", "item", "task", "tool", "topic", "review", "proposal", "research"]
 STRINGS = {"id": 80, "run": 80, "section": 80, "key": 200, "area": 200, "scope": 500, "snapshot": 200, "status": 40, "agent": 80,
-           "harness": 80, "host": 80, "model": 60, "source": 20, "body": 30000, "answer": 6000}
+           "harness": 80, "host": 80, "model": 60, "source": 20, "body": 30000, "answer": 6000, "known": 400, "origin": 20}
 EVENTS = {}  # project id -> list of events, loaded from disk on first use
 IDS = {}  # project id -> {(type, id)} already in its log, so accepting a report never has to scan the log
 KEYED = ("run", "task", "question", "proposal", "research")
@@ -112,6 +112,12 @@ def public_config(project):
     m = cfg.get("metric")
     if isinstance(m, dict):
         cfg["metric"] = {**{k: v for k, v in m.items() if k != "verify"}, "verified": bool(m.get("verify"))}
+    cfg["direction"] = cfg["direction"] if isinstance(cfg.get("direction"), str) else ""
+    cfg["simple"] = bool(cfg.get("simple"))
+    cfg["loop"] = clean_loop(cfg.get("loop"), strict=False)
+    # the checker's files, set only by editing project.json; the loop hashes them around every round
+    guard = cfg.get("protected")
+    cfg["protected"] = [p for p in guard[:50] if isinstance(p, str) and 0 < len(p) <= 200] if isinstance(guard, list) else []
     return cfg
 
 
@@ -233,7 +239,16 @@ def ingest(data, ip="127.0.0.1", verifier=True, internal=False):
                 event[k] = data[k]
         if event.get("status") == "approved" and not internal:
             raise PermissionError("a proposal is approved from the page, not by reporting it as approved")
+    elif type == "research" and data.get("source") == "you" and ("priority" in data or "status" in data) and not any(k in data for k in ("kind", "text")):
+        # the person's mark or status change alone (Drop, Reopen): the thread's claim, evidence and history stay as they were
+        if not event.get("id") or ("priority" in data and not isinstance(data["priority"], bool)) or ("status" in data and data["status"] not in RESEARCH_STATES):
+            raise ValueError("a change to a thread needs its id, and priority true or false or status one of: " + ", ".join(RESEARCH_STATES))
+        event = {"type": type, "id": event["id"], **{k: data[k] for k in ("priority", "status") if k in data}, "source": "you"}
     elif type == "research":
+        if data.get("source") == "you" and data.get("priority") is not None:  # an agent copying the mark back changes nothing
+            if not isinstance(data["priority"], bool):
+                raise ValueError("priority must be true or false")
+            event["priority"] = data["priority"]
         if data.get("kind") not in RESEARCH_KINDS:
             raise ValueError("research kind must be one of: " + ", ".join(RESEARCH_KINDS))
         if data.get("status") not in RESEARCH_STATES:
@@ -270,6 +285,8 @@ def ingest(data, ip="127.0.0.1", verifier=True, internal=False):
         if type in KEYED:
             event.setdefault("id", f"{'k' if type == 'research' else type[0]}{len(events) + 1}")
             known = (type, event["id"]) in IDS[project]
+            if not known and "text" not in event:
+                raise ValueError("no research thread has that id")
             if not known and not event["text"]:
                 raise ValueError("text is required")
             if not known and "status" not in event and type in ("task", "proposal"):
@@ -281,7 +298,86 @@ def ingest(data, ip="127.0.0.1", verifier=True, internal=False):
         events.append(event)
         if type in KEYED:
             IDS[project].add((type, event["id"]))
+    if type == "item" and event["section"] == "round-notes" and config(project).get("simple"):
+        from_handoff(project, event)  # on the lean brief the agent only writes its handoff; the record is kept from it here
     return event
+
+
+HANDOFF = re.compile(r"(?:\*\*|__)?\bhandoff\s*(?::\s*(?:\*\*|__)|(?:\*\*|__)\s*:|:)", re.I)
+LABEL = re.compile(r"^\s*(?:[-*]\s+)?(?:#+\s*)?(?:\*\*|__)?\s*(handoff|results?|ruled[ -]out|decisions?(?:\s+needed)?|leads?|next)\s*(?::\s*(?:\*\*|__)|(?:\*\*|__)\s*:|:)\s*(.*)$", re.I)
+BULLET = re.compile(r"^\s*(?:[-*+\u2022]|\d+[.)])\s+")
+TAG = re.compile(r"\s*\[(known|new)(?::\s*([^\]]*))?\]\s*$", re.I)
+
+
+def plain(text):
+    """Text as compared for duplicates: lower case, one space, no trailing punctuation."""
+    return re.sub(r"\s+", " ", text).strip().lower().rstrip(".!?,;: ")
+
+
+def handoff_items(block):
+    """{"results": [...], "ruled out": [...], "decision": [...], "leads": [...]} from a handoff, forgiving about bold, bullets, plurals and "none"."""
+    found, label = {"results": [], "ruled out": [], "decision": [], "leads": []}, None
+    for line in block.splitlines():
+        m = LABEL.match(line)
+        if m:
+            name = m.group(1).lower().replace("-", " ")
+            label = "results" if name.startswith("result") else "decision" if name.startswith("decision") else "leads" if name.startswith("lead") \
+                else name if name == "ruled out" else None
+            line = m.group(2)
+        if label is None or not line.strip():
+            continue
+        items, bullet = found[label], BULLET.match(line)
+        text = BULLET.sub("", line).replace("**", "").strip()
+        if items and not bullet and not m and line[:1].isspace():  # an indented line carries on the item above it
+            items[-1] += " " + text
+        else:
+            items.append(text)
+    return {k: [x[:400] for x in v if plain(x) not in ("", "none", "nothing", "n/a", "-")][:8] for k, v in found.items()}
+
+
+def from_handoff(project, note):
+    """Keep what a lean round reported in its handoff: the Project brief's current update, a thread per result and per
+    ruled-out approach, and a question for each decision it needs from the person. A round note without a Handoff marker
+    records nothing."""
+    body = note.get("body") or note.get("text") or ""
+    marks = list(HANDOFF.finditer(body))
+    if not marks:
+        return
+    block, agent = body[marks[-1].start():].strip(), note.get("agent")
+    ingest({"project": project, "type": "item", "section": "now", "key": "Current update", "body": block, "agent": agent, "origin": "handoff"})
+    seen = {plain(n.get("text") or "") for n in research(project)}
+    runs = {e.get("id") for e in load(project) if e["type"] == "run"}
+    parts = handoff_items(block)
+    asked = {plain(q.get("text") or "") for q in merged(load(project), "question").values() if not q.get("answer")}
+    for line in parts["decision"]:  # it reaches the person as a question they can answer on the page; the answer goes in later briefs
+        if plain(line) not in asked:
+            asked.add(plain(line))
+            ingest({"project": project, "type": "question", "text": line, "agent": agent, "origin": "handoff"})
+    # a lead is an open hypothesis: the Research panel lists it, and the person can Pursue (priority) or Drop it
+    waiting = {n["id"]: n for n in research(project) if n.get("status") == "open"}
+    for label, kind, status in (("results", "conclusion", "supported"), ("ruled out", "observation", "contradicted"), ("leads", "hypothesis", "open")):
+        for line in parts[label]:
+            tag = TAG.search(line) if label == "results" else None
+            text = line[:tag.start()].strip() if tag else line
+            if not text:
+                continue
+            cited = next((t.rstrip(".") for t in re.findall(r"[\w.-]+", text) if t.rstrip(".") in runs), None)  # "run r12", or just "r12:"
+            extra = {**({"known": "new" if tag.group(1).lower() == "new" else (tag.group(2) or "").strip() or "known"} if tag else {}),
+                     **({"run": cited} if cited else {})}
+            # A line that names an open thread as [id] settles that thread in place, so it leaves the work list: a result makes it
+            # a claim (with its run, for the check to confirm), a ruled-out line closes it with the reason.
+            named = next((waiting[i] for i in re.findall(r"\[([\w.-]+)\]", text) if i in waiting), None) if label != "leads" else None
+            if named:
+                del waiting[named["id"]]
+                said = re.sub(r"\[" + re.escape(named["id"]) + r"\]\s*:?\s*", "", text, count=1).strip() or text
+                ingest({"project": project, "type": "research", "id": named["id"], "text": named.get("text", ""), "agent": agent, **extra,
+                        **({"kind": "conclusion", "status": "supported", "body": said} if label == "results" else
+                           {"kind": named.get("kind") or "hypothesis", "status": "contradicted", "conditions": said[:2000]})})
+                continue
+            if plain(text) in seen:
+                continue
+            seen.add(plain(text))
+            ingest({"project": project, "type": "research", "kind": kind, "status": status, "text": text, "agent": agent, "origin": "handoff", **extra})
 
 
 def claim(data, ip="127.0.0.1"):
@@ -362,17 +458,73 @@ def research(project, query="", area=""):
     for i, e in enumerate(load(check_name(project))):
         if e["type"] == "research" and e.get("id"):
             old = nodes.get(e["id"], {})
-            update = {k: e[k] for k in ("ts", "agent", "source", "text", "kind", "status", "area", "scope", "snapshot", "run", "body", "conditions", "next", "evidence", "links") if k in e}
+            update = {k: e[k] for k in ("ts", "agent", "source", "text", "kind", "status", "area", "scope", "snapshot", "run", "body", "conditions", "next", "evidence", "links", "priority", "known", "origin") if k in e}
+            if "kind" not in e:  # the person's mark or status change alone: it changes only that, and does not make the thread look recently worked on
+                if old:
+                    nodes[e["id"]] = {**old, **{k: e[k] for k in ("priority", "status") if k in e}, "history": [*old["history"], update]}
+                continue
             nodes[e["id"]] = {**old, **e, "_i": i, "history": [*old.get("history", []), update]}
     out = list(nodes.values())
+    for n in out:
+        n["priority"] = bool(n.get("priority"))
     if area:
         out = [n for n in out if n.get("area") == area]
     if query:
         q = query.lower()
         out = [n for n in out if q in " ".join(str(n.get(k) or "") for k in ("id", "text", "body", "conditions", "next", "area", "scope", "snapshot", "run")).lower()]
-    out.sort(key=lambda n: n["_i"], reverse=True)
+    out.sort(key=lambda n: (n["priority"], n["_i"]), reverse=True)  # what the person marked first, then the most recently worked on
     for n in out:
         n.pop("_i", None)
+    return out
+
+
+def thread_lines(n):
+    """One research thread as a fresh round should see it: the claim, where it applies, its next test and evidence."""
+    out = [f'- [{n["id"]}] {n.get("kind", "claim")} / {n.get("status", "open")}: {n.get("text", "")}' + (f' (area: {n["area"]})' if n.get("area") else "")]
+    if n.get("scope") or n.get("snapshot") or n.get("run"):
+        out += ["  Context: " + "; ".join(f"{k}={n[k]}" for k in ("scope", "snapshot", "run") if n.get(k))]
+    if n.get("next"):
+        out += [f'  Next test: {n["next"][:300]}']
+    if n.get("evidence"):
+        out += ["  Evidence: " + "; ".join(x.get("ref", "") for x in n["evidence"][:3])]
+    return out
+
+
+def threads(claims, limit, confirmed=()):
+    """The person's marked threads first under their own heading, then other open threads, at most `limit` in all.
+    A marked thread stops being work once it is ruled out, dropped, or its run has been confirmed by the check."""
+    marked = [n for n in claims if n.get("priority") and n.get("status") not in ("superseded", "contradicted") and n.get("run") not in confirmed][:limit]
+    rest = [n for n in claims if not n.get("priority") and n.get("status") not in ("superseded", "contradicted")][:max(0, limit - len(marked))]
+    out = ["MARKED AS PRIORITY BY THE PERSON (work on these before any unmarked thread)"] if marked else []
+    for n in marked:
+        out += thread_lines(n)
+    out += ["Other open threads:"] if marked and rest else []
+    for n in rest:
+        out += thread_lines(n)
+    return out
+
+
+def steering(cfg, events):
+    """What the person has said that every round must follow: their standing direction, then what they told earlier rounds."""
+    out, direction = [], cfg.get("direction")
+    if isinstance(direction, str) and direction.strip():
+        out += ["THE PERSON'S CURRENT DIRECTION (it outranks your own choice of next step; follow it until they change it)", direction.strip(), ""]
+    said = [e for e in events if e["type"] == "activity" and e.get("source") == "you" and e.get("harness") == "terminal"][-5:]
+    if said:
+        out += ["WHAT THE PERSON SAID IN THE TERMINAL TO EARLIER ROUNDS (newest last; it still applies unless the direction above supersedes it)"]
+        for e in said:
+            words = (e.get("body") or e.get("text") or "").replace("\n", " ")
+            out.append(f'- {e.get("ts", "")[:16].replace("T", " ")} to {e.get("key") or "a worker"}: ' + words[:600] + (" ..." if len(words) > 600 else ""))
+        out.append("")
+    # An unattended loop can circle one idea all night. Rounds that end with nothing recorded are the sign.
+    quiet = 0
+    for e in reversed(events):
+        if (e["type"] in ("finding", "research", "verdict") and e.get("source") != "you") or (e["type"] == "item" and e.get("section") == "experiments"):
+            break
+        quiet += e["type"] == "activity" and bool(re.match(r"Iteration \d+ (finished|ended badly)", e.get("text") or ""))
+    if quiet >= 3:
+        out += [f"THE LAST {quiet} ROUNDS RECORDED NOTHING NEW (no finding, research thread, experiment or check result).",
+                "Do not continue the same line of work. Name three different angles in your handoff and try the one least like the recent rounds.", ""]
     return out
 
 
@@ -523,13 +675,129 @@ RUNNING = {}  # (project, agent) -> {"proc", "recipe", "started", "ended"}
 MAX_RUNNING = 8
 
 
-def recipes():
+def launcher_file():
+    """(usable recipes, a plain sentence on what in launchers.json could not be used or ""). Read on every call, so an edit to
+    the harness takes effect at the next launch without a restart."""
     try:
-        data = json.loads(LAUNCH_FILE.read_text())
-    except (OSError, ValueError):
-        return {}
+        data = json.loads(LAUNCH_FILE.read_text(encoding="utf-8-sig"))
+    except FileNotFoundError:
+        return {}, ""
+    except (OSError, ValueError) as e:
+        return {}, f"launchers.json could not be read: {e}"
+    if not isinstance(data, dict):
+        return {}, "launchers.json must be a JSON object that maps recipe names to recipes."
     ok = lambda v: isinstance(v, dict) and isinstance(v.get("command"), list) and v["command"] and all(isinstance(x, str) for x in v["command"])
-    return {k: v for k, v in data.items() if NAME.match(str(k)) and ok(v)} if isinstance(data, dict) else {}
+    good = {k: v for k, v in data.items() if NAME.match(str(k)) and ok(v)}
+    dropped = [str(k)[:40] for k in data if k not in good]
+    return good, ("Skipped in launchers.json (each recipe needs a simple name and a non-empty \"command\" list of strings): " + ", ".join(dropped) + ".") if dropped else ""
+
+
+def recipes():
+    return launcher_file()[0]
+
+
+MODEL = re.compile(r"^[\w.:\-\[\]/@]{1,80}$")
+is_claude = lambda command: Path(command[0]).name.lower() in ("claude", "claude.exe", "claude.cmd")
+
+
+def model_flag(command):
+    """Where the model is named in a command: (index of the value, "--model=" if it is joined, else ""), or None."""
+    for i, x in enumerate(command):
+        if x.startswith("--model="):
+            return i, "--model="
+        # "python3 -m module" names a module, not a model
+        if (x == "--model" or (x == "-m" and not (i == 1 and Path(command[0]).name.lower().startswith("python")))) and i + 1 < len(command):
+            return i + 1, ""
+    return None
+
+
+LOOP_DEFAULTS = {"rounds": 4, "timeout_min": 0, "reply_wait": 120, "keep_background": False, "style": "focused", "tools": "recipe"}  # research: no time limit
+WIDE_TOOLS = ["WebSearch", "WebFetch", "Task", "Agent"]  # web and subagents, by name: permission checks stay on and connectors stay refused
+LOOP_RULES = {  # what each loop setting may be, and how to say so when it is not
+    "recipe": (lambda v: isinstance(v, str) and bool(NAME.match(v)), "a recipe name from launchers.json"),
+    "model": (lambda v: isinstance(v, str) and bool(MODEL.match(v)), "1 to 80 letters, digits or . : - [ ] / @"),
+    "rounds": (lambda v: isinstance(v, int) and not isinstance(v, bool) and 0 <= v <= 500, "a whole number from 0 (until stopped) to 500"),
+    "timeout_min": (lambda v: isinstance(v, (int, float)) and not isinstance(v, bool) and 0 <= v <= 1440, "minutes from 0 (no limit) to 1440"),
+    "reply_wait": (lambda v: isinstance(v, int) and not isinstance(v, bool) and 0 <= v <= 3600, "whole seconds from 0 (never wait) to 3600"),
+    "keep_background": (lambda v: isinstance(v, bool), "true or false"),
+    "style": (lambda v: v in ("focused", "explore"), '"focused" or "explore"'),
+    "agents": (lambda v: isinstance(v, int) and not isinstance(v, bool) and 1 <= v <= 5, "a whole number from 1 to 5"),
+    "tools": (lambda v: v in ("recipe", "wide"), '"recipe" (the recipe\'s own list) or "wide" (also web search, web fetch and subagents)'),
+}
+
+
+def clean_loop(given, strict=True, keys=LOOP_RULES):
+    """The loop settings that are valid. Unknown keys and nulls are dropped; an invalid value is an error when strict
+    (what the person just sent) and skipped otherwise (a hand-edited file or a recipe's own fields)."""
+    if given is None:
+        return {}
+    if not isinstance(given, dict):
+        if strict:
+            raise ValueError("loop must be an object")
+        return {}
+    out = {}
+    for k in keys:
+        if given.get(k) is None:
+            continue
+        ok, need = LOOP_RULES[k]
+        if ok(given[k]):
+            out[k] = given[k]
+        elif strict:
+            raise ValueError(f"loop.{k} must be {need}")
+    return out
+
+
+def recipe_defaults(recipe):
+    """A recipe's own rounds, time limit, reply wait, background setting and style, with Hades's defaults where it sets none."""
+    return {**LOOP_DEFAULTS, **clean_loop(recipe, strict=False, keys=tuple(LOOP_DEFAULTS))}
+
+
+def recipe_model(command):
+    at = model_flag(command)
+    return command[at[0]][len(at[1]):] if at else ""
+
+
+def with_model(command, model):
+    """The recipe's command with the person's choice of model for this launch only."""
+    if not isinstance(model, str) or not MODEL.match(model):
+        raise ValueError("model must be 1 to 80 letters, digits or . : - [ ] / @")
+    out, at = list(command), model_flag(command)
+    if at:
+        out[at[0]] = at[1] + model
+        return out
+    if is_claude(out):
+        return out[:1] + ["--model", model] + out[1:]
+    raise ValueError("This recipe does not name a model. Add a model flag (for example --model) to its command in launchers.json, then choose the model again.")
+
+
+def with_tools(command):
+    """A Claude Code recipe's command with web search, web fetch and subagents added to its allow-list, for this launch only.
+    Another program's command is returned as it is: its tools are whatever its own recipe says."""
+    out = list(command)
+    if not is_claude(out):
+        return out
+    for i, part in enumerate(out):
+        if part in ("--allowedTools", "--allowed-tools"):
+            return out[:i + 1] + [t for t in WIDE_TOOLS if t not in out] + out[i + 1:]
+        if part.startswith(("--allowedTools=", "--allowed-tools=")):
+            return out[:i] + [part + "".join("," + t for t in WIDE_TOOLS if t not in part.split("=", 1)[1].split(","))] + out[i + 1:]
+    return out + ["--allowedTools", *WIDE_TOOLS]
+
+
+def launchers():
+    """Each recipe as the page offers it: label, its own model, the models to choose from, live or batch, and the command."""
+    try:
+        from scripts.loop import can_converse
+    except ImportError:
+        can_converse = lambda command: False
+    out = {}
+    for k, v in recipes().items():
+        models = v.get("models") if isinstance(v.get("models"), list) else None
+        out[k] = {"label": str(v.get("label") or k), "model": recipe_model(v["command"]),
+                  "models": [str(x) for x in models if isinstance(x, str)] if models is not None else ["fable", "opus", "sonnet", "haiku"] if is_claude(v["command"]) else [],
+                  "interactive": v.get("interactive") is not False and can_converse(v["command"]), "command": v["command"],
+                  "takes_tools": is_claude(v["command"]), **recipe_defaults(v)}
+    return out
 
 
 def launched(project=None):
@@ -539,13 +807,16 @@ def launched(project=None):
         for key, r in list(RUNNING.items()):
             alive = r["proc"].poll() is None
             if not alive:
+                if "ended" not in r:
+                    forget_pid(*key, r["proc"].pid)
                 r.setdefault("ended", now)
                 if now - r["ended"] > 600:
                     r["console"].close()
                     del RUNNING[key]
                     continue
             if project in (None, key[0]):
-                out.append({"project": key[0], "agent": key[1], "recipe": r["recipe"], "alive": alive, "started": r["started"], "session": r["session"]})
+                out.append({"project": key[0], "agent": key[1], "recipe": r["recipe"], "alive": alive, "started": r["started"], "session": r["session"],
+                            "interactive": r["interactive"], "model": r.get("model", ""), "settings": r.get("settings", {})})
     return out
 
 
@@ -587,14 +858,26 @@ def launch(data):
         raise ValueError("no such project")
     if not wanted:
         raise ValueError("launching is off: create launchers.json next to server.py (see launchers.example.json)")
-    name = data.get("recipe")
+    # Each setting comes from this request, else the project's saved loop settings, else the recipe, else the default
+    asked, saved = clean_loop(data), clean_loop(config(project).get("loop"), strict=False)
+    name = asked.get("recipe") or saved.get("recipe") or (next(iter(wanted)) if len(wanted) == 1 else None)
     if name not in wanted:
         raise ValueError("recipe must be one of: " + ", ".join(wanted))
     recipe = wanted[name]
-    count = data.get("count", 1)
-    rounds = data.get("rounds", recipe.get("rounds", 4))
-    if not (isinstance(count, int) and 1 <= count <= 5 and isinstance(rounds, int) and 1 <= rounds <= 500):
-        raise ValueError("count must be 1 to 5 and rounds 1 to 500")
+    settings = {k: asked.get(k, saved.get(k, v)) for k, v in recipe_defaults(recipe).items()}
+    model = asked.get("model") or saved.get("model")
+    base = with_model(recipe["command"], model) if model else recipe["command"]
+    if settings["tools"] == "wide" and is_claude(base):
+        base = with_tools(base)
+    else:
+        settings["tools"] = "recipe"  # another program's tools are whatever its own recipe says
+    settings["model"], rounds = recipe_model(base), settings["rounds"]
+    program = resolve_program(base)  # "claude" may be claude.cmd on Windows; the loop gets the path that will start
+    from scripts.loop import can_converse  # a direct `claude -p` round can be watched and messaged while it runs
+    interactive = recipe.get("interactive") is not False and can_converse(base)
+    count = data["count"] if data.get("count") is not None else saved.get("agents", 1)  # Start fans out to the project's number of workers
+    if not (isinstance(count, int) and not isinstance(count, bool) and 1 <= count <= 5):
+        raise ValueError("count must be 1 to 5")
     started = []
     with LOCK:
         alive = [k for k, r in RUNNING.items() if r["proc"].poll() is None]
@@ -602,7 +885,7 @@ def launch(data):
             raise ValueError(f"at most {MAX_RUNNING} launched agents may run at once; {len(alive)} are running")
         taken, n = {a for (p, a) in alive if p == project}, 1
         for _ in range(count):
-            while f"{name}-{n}" in taken:
+            while f"{name}-{n}" in taken or orphan(project, f"{name}-{n}"):  # two loops under one name would share a folder and a log
                 n += 1
             agent = f"{name}-{n}"
             taken.add(agent)
@@ -615,7 +898,8 @@ def launch(data):
             env = {k: v for k, v in os.environ.items() if k not in ("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT")}
             env["PROJECT_VIEW_URL"] = f"http://127.0.0.1:{PORT}"
             command = [sys.executable, str(ROOT / "scripts" / "loop.py"), project, "--agent", agent, "--harness", str(recipe.get("label") or name),
-                       "--max-iterations", str(rounds), "--timeout-min", str(recipe.get("timeout_min", 10)), "--"] + recipe["command"]
+                       "--max-iterations", str(rounds), "--timeout-min", f'{settings["timeout_min"]:g}', "--reply-wait", str(settings["reply_wait"]),
+                       *(["--keep-background"] if settings["keep_background"] else []), *(["--interactive"] if interactive else []), "--"] + program
             session = uuid.uuid4().hex
             env["HADES_LAUNCH_SESSION"] = session
             env["HADES_DETAILS_DB"] = str((ROOT / "agent-work" / ".hades" / "invocations.sqlite3").resolve())
@@ -625,18 +909,155 @@ def launch(data):
                     if not os.path.samestat(os.fstat(log.fileno()), os.fstat(console.fileno())):
                         raise OSError("terminal log changed while opening it")
                     start_offset = console.seek(0, os.SEEK_END)
-                    proc = subprocess.Popen(command, cwd=work, env=env, stdin=subprocess.DEVNULL, stdout=log,
-                                            stderr=subprocess.STDOUT, start_new_session=True)
+                    proc = subprocess.Popen(command, cwd=work, env=env, stdin=subprocess.PIPE if interactive else subprocess.DEVNULL,
+                                            stdout=log, stderr=subprocess.STDOUT, **own_group())
                 except BaseException:
                     console.close()
                     raise
+            if interactive and not WINDOWS:
+                os.set_blocking(proc.stdin.fileno(), False)  # a worker that stops reading must not stall the server; tell() waits with a deadline
+            (work / "loop.pid").write_text(f"{proc.pid}\n")  # survives a restart of this server, so the loop can still be found
             previous = RUNNING.get((project, agent))
             if previous:
                 previous["console"].close()
-            RUNNING[(project, agent)] = {"proc": proc, "recipe": name, "session": session, "console": console,
+            RUNNING[(project, agent)] = {"proc": proc, "recipe": name, "session": session, "console": console, "interactive": interactive, "pipe": threading.Lock(),
+                                         "model": settings["model"], "settings": settings,
                                          "start_offset": start_offset, "started": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")}
             started.append(agent)
-    return {"started": started, "rounds": rounds, "recipe": name}
+    return {"started": started, "rounds": rounds, "recipe": name, "model": settings["model"], "settings": settings}
+
+
+# ---------- the few things processes do differently on Windows, kept small so each can be checked on its own ----------
+
+WINDOWS = os.name == "nt"
+
+
+def own_group(windows=WINDOWS):
+    """Start a loop in a process group of its own, so stopping it reaches what it started and nothing else."""
+    return {"creationflags": getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x200)} if windows else {"start_new_session": True}
+
+
+def quiet(windows=WINDOWS):
+    """Run a helper command (tasklist, taskkill) without flashing a console window on Windows."""
+    return {"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)} if windows else {}
+
+
+def resolve_program(command):
+    """A bare program name resolved on PATH, so a claude.cmd or codex.exe shim starts without a shell."""
+    found = shutil.which(command[0]) if command and not os.path.dirname(command[0]) else None
+    return [found, *command[1:]] if found else list(command)
+
+
+def end_command(pid, windows=WINDOWS):
+    """The command that ends a loop and everything under it on Windows, or None where a signal to its group does it."""
+    return ["taskkill", "/PID", str(pid), "/T", "/F"] if windows else None
+
+
+def end_tree(pid, windows=WINDOWS):
+    """End a loop's whole process tree. True when the request was made."""
+    try:
+        if windows:
+            subprocess.run(end_command(pid, True), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15, **quiet(True))
+        else:
+            os.killpg(pid, signal.SIGTERM)
+        return True
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def process_query(pid, windows=WINDOWS):
+    """The command that describes a running process: its command line from ps, or only its image name from tasklist."""
+    return ["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"] if windows else ["ps", "-p", str(pid), "-o", "command="]
+
+
+def is_loop(shown, project, agent, windows=WINDOWS):
+    """Whether process_query's output is this agent's loop. tasklist gives no command line, so on Windows a running Python
+    process with the recorded id is taken to be it."""
+    if windows:
+        image = shown.strip().split(",")[0].strip('"').lower()
+        return image.startswith(("python", "py.exe", "pythonw"))
+    return "loop.py" in shown and f" {project} --agent {agent} " in shown
+
+
+def write_within(stream, payload, seconds):
+    """Write and flush on a helper thread, waiting at most `seconds`. Returns (bytes not known to be written, the thread if
+    it is still blocked, else None)."""
+    failed = []
+
+    def write():
+        try:
+            stream.write(payload)
+            stream.flush()
+        except (OSError, ValueError) as e:
+            failed.append(e)
+
+    worker = threading.Thread(target=write, daemon=True)
+    worker.start()
+    worker.join(max(0.0, seconds))
+    if failed:
+        raise OSError(failed[0])
+    return (payload, worker) if worker.is_alive() else (b"", None)
+
+
+def orphan(project, agent):
+    """The process id of a loop for this agent that an earlier run of this server started and that is still running, or None."""
+    if not NAME.match(agent):
+        return None
+    try:
+        pid = int((ROOT / "agent-work" / project / agent / "loop.pid").read_text().split()[0])
+        shown = subprocess.run(process_query(pid), capture_output=True, text=True, timeout=5, **quiet()).stdout
+    except (OSError, ValueError, IndexError, subprocess.SubprocessError):
+        return None
+    return pid if pid != os.getpid() and is_loop(shown, project, agent) else None
+
+
+def forget_pid(project, agent, pid):
+    """Remove a finished loop's pid file, so a later process that happens to get the same id is never taken for it."""
+    path = ROOT / "agent-work" / project / agent / "loop.pid"
+    try:
+        if path.read_text().split()[0] == str(pid):
+            path.unlink()
+    except (OSError, IndexError):
+        pass
+
+
+def tell(data):
+    """Pass the person's message to a launched worker. Its loop hands it to the Claude session it is running."""
+    project, agent, text = check_name(data.get("project")), data.get("agent"), data.get("text")
+    if not isinstance(text, str) or not 0 < len(text.strip()) <= 4000:
+        raise ValueError("Enter a message of up to 4,000 characters.")
+    with LOCK:
+        record = RUNNING.get((project, agent)) if isinstance(agent, str) else None
+        if not record or record["session"] != data.get("session") or not record["interactive"]:
+            raise ValueError("This worker has no live Claude session to message.")
+    # Written outside the server-wide lock and with a deadline: a worker that has stopped reading must not freeze every request
+    payload, deadline = (json.dumps({"text": text.strip()}) + "\n").encode(), time.time() + 5
+    with record["pipe"]:  # one message at a time per worker, so two never interleave in its pipe
+        try:
+            if record["proc"].poll() is not None:
+                raise OSError
+            if record.get("stuck") and record["stuck"].is_alive():  # an earlier message is still waiting to go in
+                raise TimeoutError
+            if WINDOWS:  # Windows pipes have no select: a writer thread waits instead, and one that hangs marks the worker
+                payload, record["stuck"] = write_within(record["proc"].stdin, payload, deadline - time.time())
+            else:
+                fd = record["proc"].stdin.fileno()
+                while payload and select.select([], [fd], [], max(0, deadline - time.time()))[1]:
+                    try:
+                        payload = payload[os.write(fd, payload):]
+                    except BlockingIOError:
+                        pass
+        except TimeoutError:
+            payload = b"unsent"
+        except (OSError, ValueError):  # a closed pipe, or a worker that has exited
+            raise ValueError("This worker has finished. Start it again to continue.") from None
+        if payload:
+            raise ValueError("This worker is not reading messages right now. Try again in a moment.")
+    # Kept in the log, so every later round hears it too, not only the session that was running
+    text = text.strip()
+    ingest({"project": project, "type": "activity", "source": "you", "harness": "terminal", "key": agent, "text": text,
+            **({"body": text} if len(text) > 2000 else {})})
+    return {"sent": True}
 
 
 def stop(data):
@@ -645,11 +1066,16 @@ def stop(data):
     with LOCK:
         for (p, a), r in list(RUNNING.items()):
             if p == project and agent in (None, "", a) and r["proc"].poll() is None:
-                try:
-                    os.killpg(r["proc"].pid, signal.SIGTERM)
-                except OSError:
-                    pass
+                end_tree(r["proc"].pid)
                 stopped.append(a)
+    # loops started before this server last restarted are not in RUNNING, but their folders still name them
+    folder = ROOT / "agent-work" / project
+    names = [agent] if isinstance(agent, str) and agent else [d.name for d in folder.iterdir() if d.is_dir()] if folder.is_dir() else []
+    for a in names:
+        pid = orphan(project, a) if a not in stopped else None
+        if pid and end_tree(pid):
+            forget_pid(project, a, pid)
+            stopped.append(a)
     for a in stopped:
         SLOTS.get(project, {}).pop(a, None)
         ingest({"project": project, "type": "activity", "text": "Loop stopped: stopped by the person", "agent": a})
@@ -716,7 +1142,7 @@ def approve(data):
             if isinstance(c.get("metric"), dict) else {}
         source = (prop.get("scorer") or {}).get("source")
         if isinstance(source, str) and source.strip():
-            (PROJECTS / project / "score.py").write_text(source)
+            (PROJECTS / project / "score.py").write_text(source, encoding="utf-8")
             metric["verify"] = "python3 score.py"
         if metric:
             cfg["metric"] = metric
@@ -754,9 +1180,17 @@ def clean_section(s):
     return out
 
 
-def set_project(data):
+def set_project(data, ip="127.0.0.1"):
     """Set the goal, summary, metric labels or sections. The scoring command cannot be set from here."""
     project = check_name(data.get("project"))
+    if any(k in data for k in ("direction", "simple", "loop")) and ip not in LOCAL:  # the person's steering and loop: only they may set them
+        raise PermissionError("only the page on the server's own machine may set the direction, the brief style or the loop settings")
+    loop = clean_loop(data["loop"]) if "loop" in data else None
+    if "simple" in data and not isinstance(data["simple"], bool):
+        raise ValueError("simple must be true or false")
+    if "direction" in data:
+        if not isinstance(data["direction"], str) or len(data["direction"]) > 4000:
+            raise ValueError("direction must be text of up to 4,000 characters")
     with LOCK:
         cfg = config(project)
         if cfg.get("phase") == "survey" and any(k in data for k in ("goal", "summary", "rules", "metric", "sections", "section")):
@@ -778,6 +1212,14 @@ def set_project(data):
             cfg["away"] = away
         if isinstance(data.get("paused"), bool):
             cfg["paused"] = data["paused"]
+        if "simple" in data:
+            cfg["simple"] = data["simple"]
+        if loop is not None:  # the object sent replaces the stored one
+            cfg["loop"] = loop
+        if "direction" in data:
+            cfg["direction"] = data["direction"].strip()
+            if not cfg["direction"]:
+                del cfg["direction"]
         if isinstance(data.get("metric"), dict):
             old = cfg.get("metric") if isinstance(cfg.get("metric"), dict) else {}
             new = {k: data["metric"][k] for k in ("name", "direction", "aggregate", "tolerance", "artifact") if k in data["metric"]}
@@ -848,6 +1290,7 @@ def survey_brief(cfg, events, post, who, known, writing, person):
             "2. Study the target until you could explain it to someone else.",
             "3. Write the Understanding page. Cover at least: what this is and what it is for; how it works, step by step; its parts,",
             "   one line each; where problems are most likely and why; and the words a newcomer needs, each defined.",
+            "   Record uncertain ideas as research threads, with the evidence and next test that could change your mind.",
             "4. Ask the person anything only they can answer (what they care about most, what is out of bounds). Then keep going;",
             "   do not wait for the answer.",
             "   " + post % ("events", "{" + who + ', "type": "question", "text": "..."}'),
@@ -898,8 +1341,92 @@ def survey_brief(cfg, events, post, who, known, writing, person):
     return out
 
 
+def lean_brief(project, agent, base, cfg, events):
+    """The brief for an unattended research loop. The model does the research; the harness keeps the record from its closing
+    handoff, so every line here is about the work. The one call worth its cost is submitting a result to the independent check."""
+    latest = {}
+    for e in events:
+        if e["type"] == "item" and e.get("section") in ("now", "surface", "experiments"):
+            latest[(e["section"], e.get("key"))] = e
+    update = latest.get(("now", "Current update")) or latest.get(("now", "Current decision")) or {}
+    shape = {s.get("id"): s for s in cfg.get("sections", []) if isinstance(s, dict)}
+    tried = [e for (section, _), e in latest.items() if section == "experiments"][-20:]
+    areas = [e for (section, _), e in latest.items() if section == "surface"][-20:]
+    notes = [e for e in events if e["type"] == "item" and e.get("section") == "round-notes" and e.get("agent") == agent and e.get("body")]
+    with LOCK:  # the worker's own launch decides its style; workers started by hand use the project's
+        mine = RUNNING.get((project, agent), {}).get("settings", {})
+        crew = sorted(a for (p, a), r in RUNNING.items() if p == project and r["proc"].poll() is None)
+    style = mine.get("style") or clean_loop(cfg.get("loop"), strict=False).get("style", "focused")
+    me = crew.index(agent) if agent in crew else None
+    agent = re.sub(r"[^\w./@:-]", "_", agent or "")[:80] or "<your-name>"  # it is pasted into a shell command below
+    claims = research(project)
+    verdicts = {e.get("run"): e for e in events if e["type"] == "verdict"}
+    refused = [f'- run {e.get("id")}: {e.get("text", "")[:200]} (check: {(verdicts[e["id"]].get("text") or "not confirmed")[:200]})'
+               for e in events if e["type"] == "run" and not e.get("probe") and e.get("id") in verdicts and not verdicts[e["id"]].get("ok")][-5:]
+    ruled = [f'- {n.get("text", "")[:300]}' + (f' (why: {n["conditions"][:200]})' if n.get("conditions") else "")
+             for n in claims if n.get("status") == "contradicted"][:20 - len(refused)] + refused
+    m = cfg.get("metric") if isinstance(cfg.get("metric"), dict) else {}
+    guard = [p for p in cfg.get("protected") or [] if isinstance(p, str)][:50] if isinstance(cfg.get("protected"), list) else []
+    if m.get("verify"):
+        check = ["THE INDEPENDENT CHECK decides what is established. Submit each result you stand behind:",
+                 f"  curl -s -X POST {base}/api/events -H 'Content-Type: application/json' -d '{{\"project\": \"{project}\", \"agent\": \"{agent}\", "
+                 f"\"type\": \"run\", \"text\": \"<one line>\", \"artifact\": <JSON>}}'" + (f"   The artifact: {m['artifact']}" if m.get("artifact") else ""),
+                 'The reply holds its id: name it in your Results line (for example "run r12").',
+                 f"Read the verdict a few seconds later:  curl -s '{base}/api/runs?project={project}&agent={agent}'"]
+    else:
+        check = ["No independent check is configured, so every result you report is a claim."]
+    out = [*steering(cfg, events),
+           *(["YOUR CLOSING NOTE FROM YOUR LAST ROUND (your only memory of it)", notes[-1]["body"][-2000:], ""] if notes else []),
+           *[f"{k.upper()}: {cfg[k]}" for k in ("target", "goal", "rules") if isinstance(cfg.get(k), str) and cfg[k].strip()],
+           *([] if str(cfg.get("goal") or "").strip() else
+             ["GOAL: none yet. Work from the person's direction above."] if str(cfg.get("direction") or "").strip() else
+             ["GOAL: none yet. Do not invent work: ask the person for a goal in your handoff, and stop."]),
+           "",
+           *(["Follow your nose this round. Your closing handoff is recorded on the dashboard for you; report nothing else.",
+              "- Go where the target looks most surprising, broken or unexplained, and keep following what you find rather than finishing a plan.",
+              "- Breadth beats proof this round: a quick look at several things is worth more than settling one.",
+              "- Run things in parallel where you can (background jobs, subagents if you have them).",
+              "- Do not spend the round gathering evidence for what you already believe. The ruled-out list below is dead ground.",
+              "- End your handoff with a Leads: line per lead worth chasing, most promising first, each with the quickest test that would confirm or kill it."]
+             if style == "explore" else
+             ["Do one round of research. Your closing handoff is recorded on the dashboard for you; report nothing else.",
+              "- One piece of work this round. Read what was already tried, below, before choosing it."]),
+           "- When a Results or Ruled out line settles a thread listed below, start that line with the thread's id in brackets, like [k12].",
+           "- Never edit the checker, its inputs or its records. If you think it is wrong, say so in the handoff and work on something else.",
+           *([f"- These files in your working folder are the checker and are watched for changes; do not edit them: {', '.join(guard)}"] if guard else []),
+           "- If only the person can decide something, put it on the Decision needed line and continue with other work.",
+           *check]
+    questions = [q for q in merged(events, "question").values() if q["asker"] != "you"]
+    words = {}  # the answer arrives as a later event without the question's text, so take the text from where it was asked
+    for e in events:
+        if e["type"] == "question" and e.get("text"):
+            words.setdefault(e.get("id"), e["text"])
+    answered, waiting = [q for q in questions if q.get("answer")][-6:], [q for q in questions if not q.get("answer")][-6:]
+    if answered:
+        out += ["", "THE PERSON DECIDED (treat as fact)", *[f'- {words.get(q["id"], "")[:300]}\n  Answer: {q["answer"][:600]}' for q in answered]]
+    if waiting:
+        out += ["", "WAITING ON THE PERSON (do not ask again; work on something else)", *[f'- {words.get(q["id"], "")[:300]}' for q in waiting]]
+    if update and (update.get("agent") != agent or not notes):
+        out += ["", "WHERE THINGS STAND (the dashboard's current update)", (update.get("body") or update.get("text") or "")[-2000:]]
+    if me is not None and len(crew) > 1:  # several workers at once: each starts somewhere different, decided by its place by name
+        starts = [n for n in claims if n.get("status") not in ("superseded", "contradicted")]
+        start = starts[me] if me < len(starts) else None
+        out += ["", f"{len(crew)} WORKERS ARE ON THIS PROJECT AT ONCE; YOU ARE NUMBER {me + 1} ({', '.join(crew)}).",
+                (f'Start from {"lead" if style == "explore" else "thread"} [{start["id"]}]: {start.get("text", "")[:200].rstrip(".")}.' if start else
+                 "Pick an angle the others are unlikely to take, and name it in your first sentence.")
+                + (" Then follow where it goes." if style == "explore" and start else "")]
+    open_threads = threads(claims, 8, {run for run, v in verdicts.items() if v.get("ok")})
+    out += ["", "RESEARCH THREADS (leads, not established)", *open_threads] if open_threads else []
+    out += ["", "RULED OUT (do not retry without a new reason, and say what is different if you do)", *ruled] if ruled else []
+    out += ["", "EXPERIMENTS SO FAR", *[f"- {e.get('key')} [{e.get('status', '')}]: {(e.get('data') or {}).get('outcome', '')}" for e in tried]] if tried else []
+    out += ["", shape.get("surface", {}).get("title", "Areas").upper(), *[f"- {e.get('key')}: {e.get('status', '')}" for e in areas]] if areas else []
+    return "\n".join(out) + "\n"
+
+
 def brief(project, agent, base):
     cfg, events = config(check_name(project)), list(load(project))
+    if cfg.get("simple"):
+        return lean_brief(project, agent, base, cfg, events)
     m = cfg.get("metric") if isinstance(cfg.get("metric"), dict) else {}
     agent = re.sub(r"[^\w./@:-]", "_", agent or "")[:80] or "<your-name>"  # it is pasted into shell examples below
     # "round-notes" is written by loop.py from each round's closing message, so agents are not asked to maintain it
@@ -929,6 +1456,7 @@ def brief(project, agent, base):
     reason = hold(project)
     if reason:
         return "\n".join(out + [f"THE PROJECT IS ON HOLD: {reason}. Do no work. Stop now; you will be started again when that changes."]) + "\n"
+    out = steering(cfg, events) + out  # the person's word leads, so a fresh round reads it before anything else
 
     # ----- what the person and the agents share: the Understanding page, and the questions going both ways -----
     topic_cmd = post % ("events", "{" + who + ', "type": "topic", "key": "<short title>", "body": "<the explanation, Markdown allowed>"}')
@@ -939,6 +1467,11 @@ def brief(project, agent, base):
         budget -= len(body)
         known += [f'## {u["key"]}   [{u["label"]}]', body + (" ..." if len(body) < len(u["body"]) else ""), ""]
     known += ["(nothing has been written yet)"] if len(known) == 1 else []
+    claims = research(project)
+    if claims:
+        known += ["", "RESEARCH THREADS (agent claims are leads, not established facts; follow their evidence)", *threads(claims, 12)]
+        known += [f'Read all {len(claims)} current research threads, including contradicted leads, at {base}/api/research?project={project}. '
+                  'Update one by reporting type "research" with the same id; link related threads by id.']
     writing = ["HOW TO WRITE FOR THE UNDERSTANDING PAGE",
                "The reader is sharp but new to this, and wants to actually learn it, not just be told the result. You may know more",
                "than they do here; your job is to bring them with you.",
@@ -948,12 +1481,7 @@ def brief(project, agent, base):
                "- One idea per topic, with a short title. To change a topic, send the same key again; do not pile up near-duplicates.",
                "- Leave topics the person wrote or confirmed alone, unless you have found one to be wrong. Then fix it, and say in its",
                "  first line what changed and why.",
-               "- Show it as well as say it. A picture of how the parts fit together teaches faster than paragraphs. Give at least",
-               "  one topic a diagram, the system at a glance, by adding this to the topic (you describe boxes and arrows; the page",
-               "  draws them):",
-               '    "diagram": {"nodes": [{"id": "a", "label": "<short name>", "note": "<one line on what it does>"}, ...],',
-               '                "edges": [{"from": "a", "to": "b", "label": "<what passes between them, optional>"}, ...]}',
-               "  Keep it to what a newcomer needs: the main parts and what flows between them, at most a dozen or so boxes.",
+               "- To write or change a topic:",
                "  " + topic_cmd]
     questions = merged(events, "question")
     asked = [q for q in questions.values() if q["asker"] == "you" and not q.get("answer")]
@@ -1060,6 +1588,9 @@ def brief(project, agent, base):
             "   missing, flagged by the person, or wrong, write or rewrite that topic.",
             "6. Post what you learned that the next agent needs, as a finding (\"body\" is optional longer text).",
             "   " + post % ("events", "{" + who + ', "type": "finding", "text": "...", "body": "..."}'),
+            "   For a hypothesis or observation that may guide later work, also report a research thread with kind, status, evidence refs,",
+            "   scope, snapshot, run id when known, conditions and the next discriminating test. Reuse its id to update it; link related threads by id.",
+            "   " + post % ("events", "{" + who + ', "type": "research", "kind": "hypothesis", "status": "open", "text": "<claim>", "scope": "<surface examined>", "snapshot": "<commit or version>", "run": "<run id if any>", "body": "<reasoning>", "conditions": "<when it applies>", "next": "<test>", "evidence": [{"ref": "<file, URL or run id>", "note": "<what it shows>"}], "links": []}'),
             "7. LAST, close your task: status \"done\", or \"review\" if a person should look before it counts as finished.",
             "   " + post % ("events", "{" + who + ', "type": "task", "id": "<task id>", "text": "<task text>", "status": "done"}'),
             "If only a person can unblock you, ask with type \"question\", then carry on with something else.",
@@ -1168,7 +1699,6 @@ MCP_TOOLS = [
          "body": {"type": "string", "description": "longer note shown on demand"}, "ok": {"type": "boolean"}, "ms": {"type": "number"},
          "value": {"description": "item: a chart point or key number"}, "data": {"type": "object", "description": "item: a table row's cells"},
          "answer": {"type": "string", "description": "question: your answer to a question the person asked (send its id)"},
-         "diagram": {"type": "object", "description": "topic: boxes and arrows the page draws: {nodes: [{id, label, note}], edges: [{from, to, label}]}"},
          "config": {"type": "object", "description": "proposal: the proposed goal, metric, sections and entries"},
          "scorer": {"type": "object", "description": "proposal: {\"source\": \"<Python scoring script>\"}"}}}},
     {"name": "next_task", "description": "Take the oldest queued task for this project and mark it running. Returns null when the queue is empty.",
@@ -1209,9 +1739,20 @@ COORDINATOR_TOOLS = [
      "something needs the person, and set how many hours they may keep running (0 for no limit).",
      "inputSchema": {"type": "object", "required": ["project"], "properties": {
          **P, "paused": {"type": "boolean"}, "max_agents": {"type": "integer"}, "stop_when_blocked": {"type": "boolean"}, "hours": {"type": "number"}}}},
+    {"name": "loop_settings", "description": "Read or change how a project's loop runs, when the person asks you to. Send only what should change; "
+     "null clears a setting back to the recipe's own value; with nothing but the project it returns what is set now. recipe is a launch recipe name; "
+     "rounds 0 means until stopped; timeout_min 0 means no time limit on a round; reply_wait is the seconds a finished round waits for the person's reply "
+     "(0 never); keep_background true leaves what the agent started running between rounds; style is focused or explore (follow your nose); agents is how "
+     "many workers Start launches (1 to 5); tools is recipe or wide (also web search, web fetch and subagents); direction is the person's standing "
+     "direction for every round, in their words; simple true is the lean brief.",
+     "inputSchema": {"type": "object", "required": ["project"], "properties": {
+         **P, "recipe": {"type": ["string", "null"]}, "model": {"type": ["string", "null"]}, "rounds": {"type": ["integer", "null"]},
+         "timeout_min": {"type": ["number", "null"]}, "reply_wait": {"type": ["integer", "null"]}, "keep_background": {"type": ["boolean", "null"]},
+         "style": {"type": ["string", "null"]}, "agents": {"type": ["integer", "null"]}, "tools": {"type": ["string", "null"]},
+         "direction": {"type": "string"}, "simple": {"type": "boolean"}}}},
     {"name": "list_launchers", "description": "The launch recipes this server allows, and the agents it has started.", "inputSchema": {"type": "object", "properties": {}}},
     {"name": "start_agents", "description": "Start agents on a project from a named launch recipe. This spends the person's model usage, so confirm the count and rounds with them first.",
-     "inputSchema": {"type": "object", "required": ["project", "recipe"], "properties": {**P, "recipe": {"type": "string"}, "count": {"type": "integer"}, "rounds": {"type": "integer"}}}},
+     "inputSchema": {"type": "object", "required": ["project"], "properties": {**P, "recipe": {"type": "string"}, "count": {"type": "integer"}, "rounds": {"type": "integer"}, "model": {"type": "string"}}}},
     {"name": "stop_agents", "description": "Stop one launched agent, or all launched agents on the project if no agent is named.",
      "inputSchema": {"type": "object", "required": ["project"], "properties": {**P, "agent": {"type": "string"}}}},
 ]
@@ -1252,8 +1793,15 @@ def coordinate(name, args):
             if args["hours"]:
                 away["until"] = (dt.datetime.now(dt.timezone.utc) + dt.timedelta(hours=float(args["hours"]))).isoformat(timespec="seconds")
         return set_project({"project": project, "away": away, **({"paused": bool(args["paused"])} if "paused" in args else {})})
-    if name == "start_agents":
-        return launch({"project": project, "recipe": args.get("recipe"), "count": args.get("count", 1), **({"rounds": args["rounds"]} if "rounds" in args else {})})
+    if name == "loop_settings":  # the person told the chat agent what they want; it acts for them, as the page would
+        change = {k: args[k] for k in LOOP_RULES if k in args}
+        if change or "direction" in args or "simple" in args:
+            merged = {**clean_loop(config(project).get("loop"), strict=False), **change}
+            set_project({"project": project, **({"loop": merged} if change else {}), **{k: args[k] for k in ("direction", "simple") if k in args}})
+        now = public_config(project)
+        return {"loop": now["loop"], "direction": now["direction"], "simple": now["simple"]}
+    if name == "start_agents":  # whatever is not named here comes from the project's saved loop settings
+        return launch({"project": project, **{k: args[k] for k in ("recipe", "count", "rounds", "model") if args.get(k) is not None}})
     if name == "stop_agents":
         return stop({"project": project, "agent": args.get("agent")})
     raise ValueError("unknown tool")
@@ -1286,6 +1834,7 @@ def coordinator_guide(base):
             f"  approve it themselves on the page ({base}). Tell them when one is waiting.",
             "- Never answer an agent's question for the person. Read it out, and use relay_answer only with the answer they give you.",
             "- A new project starts in setup: create_project, then start ONE agent to survey it, then wait for the person to approve.",
+            "- Change loop settings, the direction or the brief style only when the person asks, then tell them what is now set.",
             "- After you change something, check project_status again and report what actually happened.",
             "",
             "RIGHT NOW"]
@@ -1368,14 +1917,14 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if url.path == "/":
                 self.reply(200, (ROOT / "index.html").read_bytes(), "text/html; charset=utf-8")
-            elif url.path == "/review":
-                self.reply(200, (ROOT / "review.html").read_bytes(), "text/html; charset=utf-8")
             elif url.path == "/AGENTS.md":
                 self.reply(200, (ROOT / "AGENTS.md").read_bytes(), "text/markdown; charset=utf-8")
             elif url.path == "/api/projects":
+                offered, problem = launchers(), launcher_file()[1]
                 # epoch changes on every server start, so an open page knows to refetch instead of mixing two logs
                 self.reply(200, [{"id": p, "config": public_config(p), "count": len(load(p)), "epoch": BOOT, "experimentChecks": experiment_checks(p), "hold": hold(p), "notable": notable(p), "working": sorted(a for a, t in SLOTS.get(p, {}).items() if t > time.time()),
-                                  "launched": launched(p), "recipes": {k: v.get("label", k) for k, v in recipes().items()}} for p in project_ids()])
+                                  "launched": launched(p), "recipes": {k: v.get("label", k) for k, v in recipes().items()},
+                                  "launchers": offered, "launcherError": problem} for p in project_ids()])
             elif url.path in ("/api/terminal", "/api/run-details"):
                 host = urlparse(self.base()).hostname
                 if self.client_address[0] not in LOCAL or host not in (*LOCAL, "localhost"):
@@ -1411,60 +1960,17 @@ class Handler(BaseHTTPRequestHandler):
             traceback.print_exc()
             self.reply(500, {"error": f"server error: {type(e).__name__}: {e}"})
 
-    def review_request(self, path, data):
+    def own_page(self, header):
+        """True for a request made by this server's own page, open on this machine. Other sites cannot send these headers."""
         host = self.headers.get("Host", "")
         port = self.server.server_port
         allowed = {f"{name}:{port}" for name in ("localhost", "127.0.0.1", "[::1]")}
         if port == 80:
             allowed.update(("localhost", "127.0.0.1", "[::1]"))
-        if (self.client_address[0] not in LOCAL or host not in allowed or
-                self.headers.get("Origin") != "http://" + host or
-                self.headers.get("X-Hades-Review") != "1" or
-                self.headers.get_content_type() != "application/json"):
-            raise PermissionError("Open the review on localhost to talk to Claude.")
-        project = check_name(data.get("project"))
-        token = data.get("session")
-        if project not in project_ids() or not isinstance(token, str) or not re.fullmatch(r"[0-9a-f]{32}", token):
-            raise ValueError("Unknown project or invalid review session.")
-        key = (project, token)
-        if path == "/api/review/end":
-            review.close(key)
-            return self.reply(200, {"ended": True})
-        question = data.get("question")
-        if not isinstance(question, str) or not 0 < len(question.strip()) <= 4000:
-            raise ValueError("Enter a question of up to 4,000 characters.")
-        first = data.get("start") is True
-        prompt = "Question about the saved records:\n" + question
-        if first:
-            records = review.snapshot(list(load(project)))
-            prompt = ("Project: " + project + "\nMost recent saved experiment outcomes (up to 30):\n"
-                      + json.dumps(records, ensure_ascii=False) + "\n\n" + prompt)
-        session = review.acquire(key, first)
-        success = False
-
-        def emit(packet):
-            self.wfile.write((json.dumps(packet) + "\n").encode())
-            self.wfile.flush()
-
-        try:
-            self.send_response(200)
-            self.send_header("Content-Type", "application/x-ndjson")
-            self.send_header("Cache-Control", "no-store")
-            self.send_header("Connection", "close")
-            self.end_headers()
-            self.close_connection = True
-            session.reply(prompt, emit)
-            emit({"type": "done"})
-            success = True
-        except (BrokenPipeError, ConnectionResetError):
-            pass
-        except (OSError, ValueError):
-            try:
-                emit({"type": "error", "text": "Review ended before Claude finished. Check Claude Code and sign-in on the host, then start a new review."})
-            except OSError:
-                pass
-        finally:
-            review.finish(session, success)
+        return (self.client_address[0] in LOCAL and host in allowed and
+                self.headers.get("Origin") == "http://" + host and
+                self.headers.get(header) == "1" and
+                self.headers.get_content_type() == "application/json")
 
     def do_POST(self):
         role, ip = self.role(), self.client_address[0]
@@ -1478,14 +1984,16 @@ class Handler(BaseHTTPRequestHandler):
             if not isinstance(data, dict):
                 raise ValueError("body must be a JSON object")
             path = urlparse(self.path).path
-            if path in ("/api/review/ask", "/api/review/end"):
-                return self.review_request(path, data)
-            if path == "/api/events":
+            if path == "/api/terminal/send":  # the message reaches an agent that can run tools: this server's own page only
+                if not self.own_page("X-Hades-Terminal"):
+                    raise PermissionError("Open Hades on localhost to message this worker.")
+                out = tell(data)
+            elif path == "/api/events":
                 out = ingest(data, ip, role == "verifier")
             elif path == "/api/claim":
                 out = claim(data, ip)
             elif path == "/api/project":
-                out = set_project(data)
+                out = set_project(data, ip)
             elif path == "/api/slot":
                 out = slot(data)
             elif path == "/api/coordinate":  # the coordinator's tools for callers that do not speak MCP
@@ -1518,6 +2026,14 @@ class Handler(BaseHTTPRequestHandler):
 
     def log_message(self, *args):
         pass
+
+
+def starter():
+    """The first project on a fresh install: lean, with no goal yet. The person types what to research on the page."""
+    return set_project({"project": "workspace", "goal": "", "simple": True, "sections": [
+        {"id": "now", "title": "Project brief", "view": "note"},
+        {"id": "experiments", "title": "Experiments", "view": "table", "columns": ["outcome", "evidence"]},
+    ]})
 
 
 def serve(host="127.0.0.1"):
@@ -1555,8 +2071,5 @@ if __name__ == "__main__":
         init(sys.argv[i + 1], sys.argv[i + 2])
     else:
         if "--dashboard" in sys.argv and not project_ids():
-            set_project({"project": "workspace", "goal": "Project updates", "sections": [
-                {"id": "now", "title": "Project brief", "view": "note"},
-                {"id": "experiments", "title": "Experiments", "view": "table", "columns": ["outcome", "evidence"]},
-            ]})
+            starter()
         serve(sys.argv[sys.argv.index("--host") + 1] if "--host" in sys.argv else "127.0.0.1")

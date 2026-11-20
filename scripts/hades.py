@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """The front door. One command checks this install and runs everything a single machine needs.
 
-  python3 scripts/hades.py          check the install, then open your projects (first-time users start with practice)
+  python3 scripts/hades.py          check the install, then open the page (a first run starts with one empty project)
   python3 scripts/hades.py check    only check that this install works: a few seconds, no model needed, nothing left behind
   python3 scripts/hades.py new <target> [name]   add a ready-made project from toys/: "tinyvm" (17 planted defects),
                             or "stdlib" (25 real parsers from Python's standard library, no answer key)
@@ -13,8 +13,8 @@ Options for the first form:
                    from launchers.example.json). Without it you are asked once, if a terminal is attached.
   --host 0.0.0.0   be reachable from other machines; requires PROJECT_VIEW_TOKEN, as with server.py
 
-The practice project is "practice": a small interpreter with 17 planted defects and a hidden answer key, so you can put
-real agents on it and see how many they find. Score it with:  python3 toys/tinyvm/answer_key.py score practice
+On the page, say what to research and press Start. To try a ready-made target with an answer key instead:
+  python3 scripts/hades.py new tinyvm practice      then score it with:  python3 toys/tinyvm/answer_key.py score practice
 """
 import json
 import os
@@ -166,9 +166,8 @@ def check():
         need(len(nodes[first["id"]]["history"]) == 2 and nodes[first["id"]]["history"][0]["status"] == "open"
              and nodes[first["id"]]["history"][1]["status"] == "supported", "research history lost its changes")
         need(nodes[second["id"]]["links"][0]["to"] == first["id"], "research links were lost")
-        need(any(e.get("id") == first["id"] for e in http(f"/api/events?project={PRACTICE}")["events"]),
-             "the dashboard event stream omitted the research thread")
-        return "linked research survives updates and appears on the dashboard"
+        need("A boundary may be wrong" in http(f"/api/brief?project={PRACTICE}&agent=self-check"), "the brief omitted research")
+        return "linked research survives updates and reaches the brief"
 
     def mcp():
         hello = http("/mcp", {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}})
@@ -220,16 +219,25 @@ def listening(port):
 
 def offer_launch(yes):
     """Starting agents from the page means this server runs a command for you, so it is switched on only by the person."""
-    if server.LAUNCH_FILE.exists() or not shutil.which("claude"):
+    if server.LAUNCH_FILE.exists():
+        return
+    if not shutil.which("claude"):
+        print("  Install Claude Code (the `claude` command) and run this again to use the Start button.")
         return
     if not yes:
         if not sys.stdin.isatty():
             return
-        answer = input("Let the page (and a coordinator you talk to) start Claude Code agents on this machine? [y/N] ")
-        yes = answer.strip().lower() in ("y", "yes")
+        print("The Start button on the page runs Claude Code on this machine, in agent-work/, with your Claude account.\n"
+              "It may run shell commands and edit files there without asking. You can change this later in launchers.json.")
+        try:
+            yes = input("Allow the Start button? [y/N] ").strip().lower() in ("y", "yes")
+        except EOFError:  # no answer is a no
+            yes = False
     if yes:
         shutil.copy(server.ROOT / "launchers.example.json", server.LAUNCH_FILE)
-        print("  Wrote launchers.json. Edit it to change the model or add other agent programs.")
+        print("  Start is on. The command it runs is in launchers.json; edit it any time, no restart needed.")
+    else:
+        print("  Start is off. To turn it on later, run this again with --allow-launch.")
 
 
 def main(argv):
@@ -260,7 +268,7 @@ def main(argv):
             sys.exit(1)
         print()
     if not server.project_ids():
-        practice()
+        server.starter()
     offer_launch("--allow-launch" in argv)
     print(f"Open your project dashboard at {here}/")
     if PRACTICE in server.project_ids():
