@@ -7,7 +7,8 @@
 Options for the first form:
   --no-open        do not open the page in a browser
   --skip-check     start without checking first
-  --allow-launch   let the page start Claude Code on this machine (writes launchers.json from launchers.example.json).
+  --allow-launch   let the page start an agent on this machine: writes launchers.json with the recipe from
+                   launchers.example.json for each of Claude Code, Codex and OhMyPi that is installed here.
                    Without it you are asked once, if a terminal is attached.
 
 On the page, say what to research and press Start.
@@ -33,7 +34,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import server  # noqa: E402
 
 PROJECT = "self-check"
-HARNESSES = {"claude": "Claude Code", "codex": "Codex CLI"}
+HARNESSES = {"claude": "Claude Code", "codex": "Codex CLI", "omp": "OhMyPi"}
 
 
 def check():
@@ -154,7 +155,7 @@ def check():
         text = http("/api/brief?project=self-check-gated&agent=self-check")
         frame, later = text.partition("THIS ROUND'S FRAME")[2], text.partition("ALSO QUEUED")[2].partition("RULED OUT")[0]
         need("ESTABLISHED" in text and "issue 12" in text and f'[{now["The footer overflows"]["id"]}]' in frame, "the next brief does not lead with the claim nearest to established")
-        need(later.index("tokenizer") < later.index("trailer"), "the queue is not ordered by standing, then score")
+        need("tokenizer" in later and "trailer" in text.partition("STOPPED AT A GATE")[2].partition("ALSO QUEUED")[0], "the brief does not separate what is queued from what a gate stopped")
         (home / "scope.md").write_text("Only faults reachable over the network.\n")  # the person changes the question
         state = {n["text"]: n["state"] for n in http("/api/research?project=self-check-gated")}
         need(state["The length field overflows"] == "waiting", "a verdict outlived a change to the locked question")
@@ -187,24 +188,28 @@ def listening(port):
 
 
 def offer_launch(yes):
-    """Starting agents from the page means this server runs a command for you, so it is switched on only by the person."""
+    """Starting a loop from the page means this server runs a command for you, so it is switched on only by the person.
+    launchers.json gets the example's recipe for each agent program this machine has."""
     if server.LAUNCH_FILE.exists():
         return
-    if not shutil.which("claude"):
-        print("  Install Claude Code (the `claude` command) and run this again to use the Start button.")
+    example = json.loads((server.ROOT / "launchers.example.json").read_text(encoding="utf-8"))
+    have = {name: recipe for name, recipe in example.items() if shutil.which(recipe["command"][0])}
+    if not have:
+        print("  Install Claude Code, Codex or OhMyPi (the `claude`, `codex` or `omp` command) and run this again to use the Start button.")
         return
+    names = ", ".join(recipe["label"] for recipe in have.values())
     if not yes:
         if not sys.stdin.isatty():
             return
-        print("The Start button on the page runs Claude Code on this machine, in agent-work/, with your Claude account.\n"
+        print(f"The Start button on the page runs an agent on this machine, in agent-work/, with your own account. Found here: {names}.\n"
               "It may run shell commands and edit files there without asking. You can change this later in launchers.json.")
         try:
             yes = input("Allow the Start button? [y/N] ").strip().lower() in ("y", "yes")
         except EOFError:  # no answer is a no
             yes = False
     if yes:
-        shutil.copy(server.ROOT / "launchers.example.json", server.LAUNCH_FILE)
-        print("  Start is on. The command it runs is in launchers.json; edit it any time, no restart needed.")
+        server.LAUNCH_FILE.write_text(json.dumps(have, indent=2) + "\n", encoding="utf-8")
+        print(f"  Start is on for: {names}. The commands it runs are in launchers.json; edit them any time, no restart needed.")
     else:
         print("  Start is off. To turn it on later, run this again with --allow-launch.")
 

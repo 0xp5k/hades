@@ -482,7 +482,7 @@ function assess(n, gates, seal) {
     if (g.command && !n.artifact) return { standing: i, state: "unchecked", at: g.name };
     if (!got || got.fp !== seal || (got.checked || "") !== (n.artifact || "")) return { standing: i, state: "waiting", at: g.name };  // never run, or on another question or artifact
     if (got.verdict === "error" && (got.tries || 1) < 3) return { standing: i, state: "waiting", at: g.name };  // a gate that could not run is run again
-    if (got.verdict !== "passed") return { standing: i, state: got.verdict === "failed" ? "failed" : "error", at: g.name };
+    if (got.verdict !== "passed") return { standing: i, state: got.verdict === "failed" || got.verdict === "known" ? "failed" : "error", at: g.name };
   }
   return { standing: gates.length, state: "established", at: null };
 }
@@ -552,7 +552,8 @@ function derive(p) {
       audited: n.audited === true && n.audit_fp === seal && (n.audit_artifact || "") === (n.artifact || "") });
     const settled = n.status === "contradicted" || n.status === "superseded";
     n.ruled = n.status === "contradicted" || (n.status === "superseded" && n.history.some(e => e.status === "contradicted"));
-    n.frame = !settled && (n.status === "open" || n.state === "failed" || (n.priority && n.state === "unchecked"));
+    const known = n.state === "failed" && ((n.gates || {})[n.at] || {}).verdict === "known";  // already reported: nothing a round can repair
+    n.frame = !settled && (n.status === "open" || (n.state === "failed" && !known) || (n.priority && n.state === "unchecked"));
     n.stalled = n.frame && n.attempts >= n.budget;
     n.bucket = bucket(n);
   }
@@ -644,6 +645,7 @@ function gateState(n, g, i, seal) {
   const got = (n.gates || {})[g.name], live = got && got.fp === seal;
   if (i < n.standing && live) return ["solid", "✓ ", g.refute ? "not refuted" : "passed", g.refute ? "Not refuted" : "Passed"];
   if (i !== n.standing) return ["", "", "not reached", "Not reached"];
+  if (n.state === "failed" && got?.verdict === "known") return ["bad", "✗ ", "already known", "Already known: a refuter cited where. It is not queued again"];
   if (n.state === "failed") return ["bad", "✗ ", g.refute ? "refuted" : "failed", g.refute ? "Refuted" : "Failed"];
   if (n.state === "error") return ["bad", "! ", "could not run", "Could not run"];
   if (n.state === "unchecked") return ["", "", "needs an artifact", "Needs an artifact: the claim names none for this command to run on"];
@@ -697,7 +699,7 @@ function threadDetails(n, all, p) {
   const author = e => e.source === "you" ? "You" : e.agent || "Agent";
   const incoming = all.flatMap(x => (x.links || []).filter(l => l.to === n.id).map(l => ({ ...l, from: x.id })));
   const history = (n.history || []).slice().reverse().map((e, i) => {
-    const changes = e.source === "gate" ? [`${e.gate}: ${e.verdict === "passed" ? "passed" : e.verdict === "failed" ? "failed" : "could not run"}`]
+    const changes = e.source === "gate" ? [`${e.gate}: ${e.verdict === "passed" ? "passed" : e.verdict === "failed" ? "failed" : e.verdict === "known" ? "already known" : "could not run"}`]
       : ["text", "kind", "status", "area", "scope", "snapshot", "body", "conditions", "next", "evidence", "links", "priority", "artifact", "score", "audited"]
       .filter(k => Object.hasOwn(e, k) && (k !== "text" || e.text)).map(k => k === "text" ? "claim" : k === "next" ? "next test" : k === "priority" ? (e.priority ? "marked as a priority" : "priority removed")
         : k === "artifact" ? "artifact to check" : k === "score" ? `worth ${e.score} rounds` : k === "audited" ? (e.audited ? "audited" : "audit removed") : k);

@@ -15,8 +15,9 @@ page to start it and to see everything. To steer it or have it explained, talk t
     python3 scripts/hades.py
 
 That one command checks the install (eight checks, a few seconds, no model needed), starts the page and opens
-http://127.0.0.1:8765. The first time, it asks once whether the page's Start button may run Claude Code on this machine
-(saying yes copies `launchers.example.json` to `launchers.json`, which you can edit later), and it creates one empty
+http://127.0.0.1:8765. The first time, it asks once whether the page's Start button may run an agent on this machine
+(saying yes writes `launchers.json` with a recipe for each of Claude Code, Codex and OhMyPi it finds installed, which you
+can edit later), and it creates one empty
 project. Type what to research on the page and press Start.
 
     python3 scripts/hades.py check   # only the check; exits 0 if everything works
@@ -197,8 +198,17 @@ It asks for no reporting.
 
 ## Starting the loop from the page
 
-Off until `launchers.json` exists. `python3 scripts/hades.py --allow-launch` creates it for Claude Code; or copy
-`launchers.example.json` yourself and edit the command for your harness. Each entry is a named recipe (see "Changing the
+Off until `launchers.json` exists. `python3 scripts/hades.py --allow-launch` creates it with a recipe for each agent
+program installed here; or copy `launchers.example.json` yourself and edit the commands. With more than one recipe,
+choose which a project uses in its Settings.
+
+| Agent | Recipe command | How the brief reaches it |
+|---|---|---|
+| Claude Code | `claude -p --model opus --allowedTools Bash Read Write Edit Glob Grep` | standard input; rounds are live and can be messaged |
+| Codex | `codex exec --skip-git-repo-check -s workspace-write -c approval_policy="never" -` | standard input; it may write only inside its working folder |
+| OhMyPi | `omp -p --no-session --auto-approve @{brief_file}` | a file, named with `@` |
+
+Any program that takes a prompt on standard input or as a file works the same way, refuter gates included. Each entry is a named recipe (see "Changing the
 harness" in `AGENTS.md`). The file is read again at every launch.
 
 A project runs one loop at a time: Start is refused while one is alive, and Stop ends the loop and everything its round

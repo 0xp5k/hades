@@ -419,10 +419,10 @@ STREAM = ["--input-format", "stream-json", "--output-format", "stream-json", "--
 EXIT_WAIT = 60  # seconds Claude gets to exit once its input has ended
 HANDOFF = """When you finish, end your final response with this block. It is saved as your only memory of this round and recorded on the dashboard for you, so you do not need to report anything else.
 Handoff: <what you did and what you observed, in a few sentences>
-Results: <one line per result you are claiming, or "none". End a line with [known: reference] if it is already known, or [new] if you looked and found no prior statement>
-Ruled out: <one line per approach this round showed does not work, with the reason, or "none">
+Results: <one line per result you are claiming, the strongest first and at most 8, or "none". If gates are listed above, end each with [check: <artifact>]. Add [new] if you looked and found no earlier statement of it>
+Ruled out: <one line per approach this round showed does not work, with the reason, or "none". Something that turned out to be already known goes here too, with the reference>
 Assumed: <anything only the person could have decided: the cautious choice you made instead, and why, or "none">
-Leads: <one line per new place worth looking, most promising first, each with its quickest test and [score: 1-5] for the rounds it is worth, or "none">
+Leads: <one line per new place worth looking, most promising first, each with its quickest test and a score: [score: 4] direct evidence, [score: 3] plausible, [score: 1] a long shot; or "none">
 Next: <the single most useful next step>"""
 
 
@@ -660,14 +660,15 @@ def run_conversation(args, brief, timeout, env, inbox, reply_wait=120, keep=Fals
 
 
 REFUTERS_PER_ROUND = 4
-VERDICT = re.compile(r"^\s*(?:[-*]\s+)?\**\s*verdict\s*\**\s*:\s*\**\s*(refuted|stands)\b", re.I | re.M)
+VERDICT = re.compile(r"^\s*(?:[-*]\s+)?\**\s*verdict\s*\**\s*:\s*\**\s*(refuted|known|stands)\b(?!\s*\**\s*[-:]?\s*<)", re.I | re.M)
 
 
 def run_gates(a, query, command):
     """Run the project's gates on what the round claimed. The server names, for each claim with an artifact, the next gate
     it has not passed; passing one makes the next due, so ask again until nothing is. A command gate passes on exit code
-    0. A refuter gate passes when a fresh round, shown only the claim, ends with "Verdict: stands". A gate that cannot
-    start, runs out of time or (a refuter) gives no verdict is an error. Each verdict goes on the claim's thread."""
+    0. A refuter gate passes when a fresh round, shown only the claim, ends with "Verdict: stands"; "refuted" fails it,
+    and "known" fails it for good (what is already known cannot be repaired). A gate that cannot start, runs out of time
+    or (a refuter) gives no verdict is an error. Each verdict goes on the claim's thread."""
     done, refuters, silent = set(), 0, 0
     for _ in range(10):  # at most this many gates deep
         try:
@@ -707,7 +708,7 @@ def run_gates(a, query, command):
                     finally:
                         os.unlink(f.name)
                     said = VERDICT.findall(output)
-                    verdict = "error" if code != 0 or not said else "failed" if said[-1].lower() == "refuted" else "passed"
+                    verdict = "error" if code != 0 or not said else {"refuted": "failed", "known": "known"}.get(said[-1].lower(), "passed")
                     silent = silent + 1 if verdict == "error" else 0
                 detail = output.strip() if isinstance(code, int) else f"{output.strip()}\n{code}".strip()
             except (OSError, ValueError) as e:
@@ -819,6 +820,11 @@ def run_loop():
             continue
 
         n += 1
+        # Where it is working, and for how long: neither is in the record, and both change what a round should do.
+        brief += (f"\nYou are working in {os.getcwd()}. It persists between rounds, so files earlier rounds left are here. The gates run here after you "
+                  "finish, on the path you name: leave each artifact in place and never overwrite an earlier one.\n")
+        if a.timeout_min:
+            brief += f"This round is stopped after {a.timeout_min:g} minutes, and a stopped round leaves no handoff: nothing it found is kept. Write the handoff well before then.\n"
         brief += "\n\n" + HANDOFF
         with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".txt", prefix="brief-", delete=False) as f:
             f.write(brief)

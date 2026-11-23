@@ -1,6 +1,13 @@
 {
   "claude": {
     "label": "Claude Code",
+    "rounds": 4,
+    "models": [
+      "fable",
+      "opus",
+      "sonnet",
+      "haiku"
+    ],
     "command": [
       "claude",
       "-p",
@@ -13,13 +20,31 @@
       "Edit",
       "Glob",
       "Grep"
-    ],
-    "models": [
-      "fable",
-      "opus",
-      "sonnet",
-      "haiku"
-    ],
-    "rounds": 4
+    ]
+  },
+  "codex": {
+    "label": "Codex",
+    "rounds": 4,
+    "command": [
+      "codex",
+      "exec",
+      "--skip-git-repo-check",
+      "-s",
+      "workspace-write",
+      "-c",
+      "approval_policy=\"never\"",
+      "-"
+    ]
+  },
+  "omp": {
+    "label": "OhMyPi",
+    "rounds": 4,
+    "command": [
+      "omp",
+      "-p",
+      "--no-session",
+      "--auto-approve",
+      "@{brief_file}"
+    ]
   }
 }

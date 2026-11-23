@@ -68,6 +68,10 @@ reply = json.loads(sys.stdin.readline())["message"]["content"]
 done("Second turn: " + reply, num_turns=3, total_cost_usd=0.5, usage={"input_tokens": 5, "output_tokens": 3})
 sys.exit(0 if sys.stdin.read() == "" else 3)
 """
+    # A refuter's verdict is the last one it gave; the brief's own template lines, echoed back, are not a verdict.
+    said = lambda text: [v.lower() for v in loop.VERDICT.findall(text)]
+    assert said("thinking\n**Verdict:** refuted - issue 12\n") == ["refuted"] and said("- Verdict: stands - ran it twice") == ["stands"]
+    assert said("Verdict: refuted - <the concrete evidence>\nVerdict: stands - <what you tried and where you looked>\nI could not decide.") == []
     assert loop.can_converse(["claude", "-p", "--model", "sonnet"])
     assert not loop.can_converse(["claude", "-p", "--output-format", "json"])
     assert not loop.can_converse(["claude", "-p", "{brief}"]) and not loop.can_converse(["codex", "exec", "-"])
@@ -284,7 +288,9 @@ sys.exit(0 if sys.stdin.read() == "" else 3)
     def server(path, body=None):
         events.append(body)
         return "{}" if path.startswith("/api/project?") else "brief"
-    echo = "import sys; ok = sys.stdin.read() == sys.argv[1]; print('Handoff: done'); sys.exit(0 if ok else 5)"
+    # the brief, then where the round is working, then the handoff instruction, in that order
+    echo = ("import os, sys; got = sys.stdin.read(); ok = got.startswith('brief\\n') and got.endswith('\\n\\n' + sys.argv[1]) and 'You are working in ' + os.getcwd() in got\n"
+            "print('Handoff: done'); sys.exit(0 if ok else 5)")
     here = os.getcwd()
     with tempfile.TemporaryDirectory() as work:
         os.chdir(work)
@@ -292,7 +298,7 @@ sys.exit(0 if sys.stdin.read() == "" else 3)
             with patch.object(loop, "call", server), patch.object(loop.time, "sleep", lambda s: None), \
                     patch.object(loop.sys, "stdout", io.TextIOWrapper(io.BytesIO(), newline="\n", encoding="utf-8")), \
                     patch.object(loop.sys, "argv", ["loop.py", "p", "--agent", "a", "--max-iterations", "2", "--no-notes", "--",
-                                                    sys.executable, "-c", echo, "brief\n\n" + loop.HANDOFF]):
+                                                    sys.executable, "-c", echo, loop.HANDOFF]):
                 loop.main()
         finally:
             os.chdir(here)

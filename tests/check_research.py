@@ -236,7 +236,7 @@ def check(directory):
         assert len(threads) == before + 2 and len(made) == 2, made
         by = {t["text"]: t for t in made}
         off = by["Off-by-one in footer length"]
-        assert (off["kind"], off["status"], off["known"], off["agent"]) == ("conclusion", "supported", "CVE-2020-1", "a1") and "run" not in off
+        assert (off["kind"], off["status"], off["conditions"], off["agent"]) == ("observation", "contradicted", "already known: CVE-2020-1", "a1") and "known" not in off
         crash = by["Parser crashes on empty input"]
         assert crash["known"] == "new"
         now = [e for e in call("/api/events?project=lean")["events"] if e["type"] == "item" and e.get("section") == "now"][-1]
@@ -260,7 +260,7 @@ def check(directory):
         note("lean", "handoff: second round\nResult: nothing\nRULED OUT:\n* Brute force over 2^32: too slow\n  on this laptop\n"
                      "2) Fuzzing the footer: footer is bounds-checked\nNext: x")
         ruled = [t for t in call("/api/research?project=lean") if t.get("origin") == "handoff" and t["status"] == "contradicted"]
-        assert sorted(t["text"] for t in ruled) == ["Brute force over 2^32: too slow on this laptop", "Fuzzing the footer: footer is bounds-checked"], ruled
+        assert sorted(t["text"] for t in ruled) == ["Brute force over 2^32: too slow on this laptop", "Fuzzing the footer: footer is bounds-checked", "Off-by-one in footer length"], ruled
         assert all(t["kind"] == "observation" for t in ruled)
         # Leads, in any style: open hypotheses, without repeating a thread that exists
         note("lean", "Handoff: wandered\nResults: none\nLeads:\n- Tokens over 64k wrap: send 65537 bytes\n- Header length is trusted\nLead: the footer\nNext: x")
@@ -433,7 +433,7 @@ def check(directory):
 
             # There is no round style to set. With nothing queued a round widens; with a frame queued it settles that frame.
             wide = brief("style", "solo")
-            for expected in ("Follow your nose this round: nothing is queued", "Breadth beats proof", "in parallel", "Leads: line", "dead ground", "[score: 1-5]"):
+            for expected in ("Follow your nose this round: nothing is queued", "Breadth beats proof", "in parallel", "Leads: line", "dead ground", "[score: 4] you saw direct evidence"):
                 assert expected in wide, (expected, wide)
             assert "THIS ROUND'S FRAME" not in wide and call("/api/brief?project=style&agent=solo&as=json")["frame"] is None
             queued = call("/api/frames", {"project": "style", "frames": [{"text": "the tokenizer on nested brackets", "score": 2, "next": "time a deep input"}]})["added"]
@@ -532,8 +532,8 @@ def check_units():
                 first, second = now[lead["first lead"]], now[lead["second lead"]]
                 assert (first["kind"], first["status"], first["text"], first["found_in"], first["known"], first["priority"]) == ("conclusion", "supported", "it holds", "first lead", "new", True), first
                 assert (second["status"], second["conditions"], second["text"]) == ("contradicted", "a guard stops it", "second lead"), second
-                listed = [line for line in server.brief("s", "b").partition("RESEARCH THREADS")[2].partition("RULED OUT")[0].splitlines() if line.startswith("- [")]
-                assert listed == [f"- [{lead['first lead']}] conclusion / supported: it holds"], listed
+                listed = [line for line in server.brief("s", "b").partition("CLAIMED (another round's word")[2].partition("RULED OUT")[0].splitlines() if line.startswith("- [")]
+                assert listed == [f"- [{lead['first lead']}] it holds (the person's priority)"], listed
                 # An id in the middle of a line is prose, not a settlement; a marker in the middle of a line is not the Handoff.
                 note(f"Handoff: x\nResults:\n- Unlike the idea in [{lead['first lead']}], the decoder leaks\nRuled out:\n- trusting the previous handoff: it was stale\nNext: y", 3)
                 after = {n["id"]: n for n in server.research("s")}
@@ -580,18 +580,20 @@ def check_units():
                 assert server.public_config("c")["fingerprint"] == seal and server.config("c")["goal"] == "g2"
                 text = server.brief("c", "a")
                 for expected in ("A RESULT COUNTS ONLY WHEN IT PASSES THE GATES, in this order: reproduces, default config, not known.",
-                                 "- reproduces: python3 ", "--strict <artifact>", "default.sh '{artifact}'", "to name what should be checked: a file holding the input. A command gate cannot run without one.",
+                                 "- reproduces: python3 ", "--strict <artifact>", "- default config: sh ", "default.sh", "{artifact}", "to name what should be checked: a file holding the input. A command gate cannot run without one.",
                                  "- not known: a separate round that sees only your claim and tries to refute it.", "Never edit the gates"):
                     assert expected in text, (expected, text)
                 assert "Nothing re-checks" not in text
                 note = lambda body, n, **data: server.ingest({"project": "c", "type": "item", "section": "round-notes", "key": f"Round {n}", "agent": "a", "body": body,
                                                               **({"data": data} if data else {})})
-                note("Handoff: x\nResults:\n- Lemma one holds [check: one.bin] [new]\n- Lemma two holds [known: Hardy 1915] [check:  two.bin ]\n"
+                note("Handoff: x\nResults:\n- Lemma one holds [check: one.bin] [new]\n- Lemma two holds [check:  two.bin ]\n- Lemma zero is classical [known: Hardy 1915] [check: zero.bin]\n"
                      "- It looks true for n < 100\nNext: y", 1)
                 by = {n["text"]: n for n in server.research("c")}
                 one, two, loose = by["Lemma one holds"], by["Lemma two holds"], by["It looks true for n < 100"]
                 assert (one["artifact"], one["known"], one["state"], one["at"], one["standing"]) == ("one.bin", "new", "waiting", "reproduces", 0), one
-                assert (two["artifact"], two["known"]) == ("two.bin", "Hardy 1915") and (loose["state"], loose["at"], loose["frame"]) == ("unchecked", "reproduces", False), (two, loose)
+                assert two["artifact"] == "two.bin" and (loose["state"], loose["at"], loose["frame"]) == ("unchecked", "reproduces", False), (two, loose)
+                old = by["Lemma zero is classical"]  # the round itself says it is known: ruled out with the reference, and no gate is spent on it
+                assert (old["status"], old["conditions"], old["state"], old.get("artifact")) == ("contradicted", "already known: Hardy 1915", None, None), old
                 todo = server.gates_pending("c")["pending"]
                 assert [(x["id"], x["gate"], x["artifact"], x["timeout_min"]) for x in todo] == [(one["id"], "reproduces", "one.bin", 10), (two["id"], "reproduces", "two.bin", 10)], todo
                 assert todo[0]["command"] == ["python3", where + "/re play.py", "--strict"] and "brief" not in todo[0]
@@ -626,18 +628,20 @@ def check_units():
                                  "YOUR JOB (not known): Look for an earlier report.", "Verdict: refuted - ", "Verdict: stands - ", "GOAL: g2"):
                     assert expected in todo[0]["brief"], (expected, todo[0]["brief"])
                 assert "Hardy" not in todo[0]["brief"] and "Handoff" not in todo[0]["brief"]  # the claim, and nothing about the round
+                for expected in ("Verdict: known - ", "Do not read loop.log", "last six lines before your verdict"):
+                    assert expected in todo[0]["brief"], expected
                 verdict(one["id"], "not known", "passed", checked="one.bin", detail="Verdict: stands - searched")
                 now = {n["id"]: n for n in server.research("c")}
                 assert (now[one["id"]]["standing"], now[one["id"]]["state"], now[one["id"]]["frame"]) == (3, "established", False) and server.gates_pending("c") == {"pending": []}
                 text = server.brief("c", "a")
                 settled, refused = text.partition("ESTABLISHED (passed every gate")[2].partition("CLAIMED, BUT STOPPED AT A GATE")[::2]
-                assert f"- [{one['id']}] Lemma one holds (artifact: one.bin)" in settled and f"- [{two['id']}] Lemma two holds" in refused, text
-                assert "Stopped at reproduces (failed) on two.bin:" in refused and "no fault" in refused
+                assert f"- [{one['id']}] Lemma one holds (artifact: one.bin)" in settled, text
                 # The stopped claim is this round's frame: nearest to a result. With gates behind it, the frame is assumed to pay off.
                 frame = text.partition("THIS ROUND'S FRAME (round 1 of 3 on it)")[2]
-                assert f"- [{two['id']}] conclusion / supported: Lemma two holds" in frame and 'stopped at the gate "reproduces"' in frame and "Work as if" not in frame, text
+                assert f"- [{two['id']}] conclusion / supported: Lemma two holds" in frame and "It is a claim that a gate stopped." in frame and "Stopped at reproduces (failed) on two.bin:" in frame, text
+                assert "no fault" in frame and "rule it out; do not reword it" in frame and "Try hard to make this frame pay off" not in frame
                 assert f"a Results line that starts with [{two['id']}] and ends with [check: <artifact>], or" in frame
-                assert f"- [{loose['id']}] It looks true for n < 100" in text.partition("CLAIMED, NOT CHECKED")[2]
+                assert f"- [{loose['id']}] It looks true for n < 100" in text.partition("CLAIMED, NOT YET THROUGH THE GATES")[2]
                 # The person's audit is of this artifact under these gates.
                 mark = lambda **k: server.ingest({"project": "c", "type": "research", "id": one["id"], "source": "you", **k})
                 assert mark(audited=True)["audit_fp"] == seal
@@ -662,7 +666,7 @@ def check_units():
                 note(f"Handoff: x\nResults:\n- [{two['id']}]: repaired the induction step [check: two-b.bin]\n- [{one['id']}] is not waiting, so this is a new claim [check: one.bin]\n"
                      "- It looks true for n < 100 [check: small.bin]\nNext: y", 2, frame=two["id"], cwd="/somewhere/the/round/worked")
                 now = {n["id"]: n for n in server.research("c")}
-                assert len(now) == 4 and now[two["id"]]["artifact"] == "two-b.bin" and now[two["id"]]["body"] == "repaired the induction step" and now[two["id"]]["text"] == "Lemma two holds", now[two["id"]]
+                assert len(now) == 5 and now[two["id"]]["artifact"] == "two-b.bin" and now[two["id"]]["body"] == "repaired the induction step" and now[two["id"]]["text"] == "Lemma two holds", now[two["id"]]
                 assert (now[two["id"]]["state"], now[two["id"]]["at"], now[two["id"]]["attempts"], now[two["id"]]["frame"]) == ("waiting", "reproduces", 1, False)
                 assert now[one["id"]]["state"] == "established" and now[loose["id"]]["artifact"] == "small.bin"
                 assert now[two["id"]]["folder"] == "/somewhere/the/round/worked" and server.gates_pending("c")["pending"][0]["cwd"] == "/somewhere/the/round/worked"
@@ -674,7 +678,15 @@ def check_units():
                 verdict(two["id"], "reproduces", "error", checked="two-b.bin", detail="timeout after 10 min")
                 assert "Stopped at reproduces (could not run) on two-b.bin" in server.brief("c", "a")
                 server.add_frames({"project": "c", "frames": ["a fresh place to look"]})  # an open frame with gates behind it is assumed to pay off
-                assert "Work as if this frame pays off" in server.brief("c", "a").partition("THIS ROUND'S FRAME")[2]
+                assert "Try hard to make this frame pay off. Claim only what you ran and saw yourself." in server.brief("c", "a").partition("THIS ROUND'S FRAME")[2]
+                # A refuter that cites where a claim was already reported stops it for good: it is not queued for repair.
+                fresh = server.ingest({"project": "c", "type": "research", "kind": "conclusion", "status": "supported", "text": "A thing that turns out to be in a 1915 paper", "artifact": "k.bin"})["id"]
+                for gate in ("reproduces", "default config"):
+                    verdict(fresh, gate, "passed", checked="k.bin")
+                verdict(fresh, "not known", "known", checked="k.bin", detail="Verdict: known - Hardy 1915, section 3, states it")
+                cited = next(n for n in server.research("c") if n["id"] == fresh)
+                assert (cited["state"], cited["at"], cited["standing"], cited["frame"]) == ("failed", "not known", 2, False), cited
+                assert "says it is already known" in server.brief("c", "a") and fresh not in [n["id"] for n in server.queue(server.research("c"))]
                 assert next(n for n in server.research("c") if n["id"] == two["id"])["frame"] is False  # nothing for a round to repair
                 server.ingest({"project": "c", "type": "research", "id": one["id"], "status": "open", "source": "you"})  # the person reopens what was established and audited
                 note(f"Handoff: x\nResults:\n- [{one['id']}]: in fact a different thing entirely\nNext: y", 9)
@@ -688,7 +700,7 @@ def check_units():
                         pass
                 note(f"Handoff: x\nResults: none\nRuled out:\n- [{two['id']}]: the induction step is false at n = 4\nNext: y", 3)
                 gone = {n["id"]: n for n in server.research("c")}[two["id"]]
-                assert gone["status"] == "contradicted" and "STOPPED AT A GATE" not in server.brief("c", "a")
+                assert gone["status"] == "contradicted" and f"[{two['id']}]" not in server.brief("c", "a").partition("STOPPED AT A GATE")[2].partition("RULED OUT")[0]
                 assert "Lemma two holds (why: the induction step is false at n = 4)" in server.brief("c", "a")
             finally:
                 server.PROJECTS = kept
@@ -746,6 +758,10 @@ def check_units():
                 assert server.plan("w", "a")[1] == only
                 server.ingest({"project": "w", "type": "activity", "agent": "a", "text": "Iteration 1 started", "data": {"frame": only}})  # it printed nothing, so there is no note; the round is spent all the same
                 text, given = server.plan("w", "a")  # its one round is spent: nobody is asked; the next round widens, and is told what was set aside
+                server.ingest({"project": "w", "type": "item", "section": "round-notes", "key": "Round 2", "agent": "a", "body": "Handoff: x\nLeads:\n- a lead a round calls certain [score: 5]\nNext: y"})
+                sure = next(n for n in server.research("w") if n["text"] == "a lead a round calls certain")
+                assert sure["budget"] == 4  # 5 is the person's to give: a round's own lead tops out at 4
+                server.ingest({"project": "w", "type": "research", "id": sure["id"], "status": "superseded", "source": "you"})
                 assert given is None and "Follow your nose this round: nothing is queued" in text and f"- [{only}] the one place" in text.partition("SET ASIDE (their rounds are spent")[2], text
             finally:
                 server.PROJECTS = kept
