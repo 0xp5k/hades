@@ -19,7 +19,8 @@ explained, talk to an assistant (Claude, Codex) and point it at `GET /api/status
 
 That checks the install (eight checks, a few seconds, no model), starts the server and opens http://127.0.0.1:8765. The
 first time, it asks once whether the page's Start button may run an agent on this machine; yes writes `launchers.json`
-with a recipe for each of Claude Code, Codex and OhMyPi it finds. Type what to research and press Start.
+with a recipe for each of Claude Code, Codex and OhMyPi it finds. Press Copy for Claude, tell your assistant what to
+research (it sets the goal), and press Start loop.
 
     python3 scripts/hades.py check   # only the check; exits 0 if everything works
     python3 server.py                # the server on its own

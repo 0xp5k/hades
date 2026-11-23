@@ -625,7 +625,7 @@ function overview(p, d) {
     ${paged("assumptions", d.assumptions, 5, x => `<li><span>${esc(x.text)}</span><span class="sub nowrap">${esc(x.by || "a round")} · ${esc(ago(x.asked))}</span></li>`, html => `<ul class="rows mt2">${html}</ul>`)}</section>` : "";
   const said = k => typeof p.config[k] === "string" ? p.config[k].trim() : "";
   const about = `<dl class="kv">${[["Goal", said("goal")], ["Target", said("target")], ["Direction", said("direction")]].filter(([k, v]) => v || k === "Goal")
-    .map(([k, v]) => `<dt>${k}</dt><dd>${v ? esc(v) : '<span class="sub">Not set</span>'}</dd>`).join("")}</dl>`;
+    .map(([k, v]) => `<dt>${k}</dt><dd>${v ? esc(v) : '<span class="sub">Not set. Tell your assistant what to research: Copy for Claude, above, gives it what it needs.</span>'}</dd>`).join("")}</dl>`;
   return `<header class="pagehead"><h1>${esc(projectTitle(p))}</h1></header>${status}${funnel}${cost}<div class="ov-grid">${found}${queue}${gateBox}</div>${handoff}${assumed}${about}`;
 }
 
