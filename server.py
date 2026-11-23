@@ -5,7 +5,7 @@
   python3 server.py --dashboard      the same, creating one empty project first if there are none
 
 Each project is a folder under projects/ holding:
-  project.json   goal, direction, loop settings and the pages this project has
+  project.json   goal, target, rules, direction, loop settings and gates
   events.jsonl   append-only log of everything reported
 
 What the loop, the page and a chat agent call:
@@ -17,12 +17,11 @@ What the loop, the page and a chat agent call:
   GET  /api/research?project=X&q=TEXT&area=A  current research threads
   GET  /api/gates?project=X                   the claims waiting for a gate, and what to run on each
   POST /api/frames   {"project", "frames"}    queue places to look, many at once
-  POST /api/events   {"project", "type", ...} report: activity, item, question, research or topic
-  POST /api/project  {"project", ...}         set goal, summary, rules, target, direction, paused, loop or a section
+  POST /api/events   {"project", "type", ...} report: activity, note (a round's closing handoff), question or research
+  POST /api/project  {"project", ...}         set goal, rules, target, direction, paused or loop
   POST /api/new      {"project", "goal"}      create a project
   POST /api/launch   {"project", ...}         start the project's loop from a recipe in launchers.json
   POST /api/stop     {"project"}              stop it
-  POST /api/terminal/send {"project", "agent", "session", "text"}   message a live Claude round (this server's own page only)
 
 Trust: every caller is on this machine and is trusted. Run it somewhere you would run the agents themselves.
 """
@@ -51,15 +50,13 @@ PROJECTS = ROOT / "projects"
 PORT = int(os.environ.get("PROJECT_VIEW_PORT", 8765))
 LOCK = threading.RLock()
 NAME = re.compile(r"^\w[\w.-]{0,79}$")
-TYPES = ["activity", "item", "question", "research", "topic"]
-STRINGS = {"id": 80, "section": 80, "key": 200, "area": 200, "scope": 500, "snapshot": 200, "status": 40, "agent": 80,
+TYPES = ["activity", "note", "question", "research"]  # note: what a round printed at its end, from its Handoff marker on
+STRINGS = {"id": 80, "key": 200, "area": 200, "status": 40, "agent": 80,
            "harness": 80, "model": 60, "source": 20, "body": 30000, "answer": 6000, "known": 400, "origin": 20}
 EVENTS = {}  # project id -> list of events, loaded from disk on first use
 IDS = {}  # project id -> {(type, id)} already in its log, so accepting a report never has to scan the log
 KEYED = ("question", "research")
-RESEARCH_KINDS = ("hypothesis", "observation", "experiment", "conclusion")
-RESEARCH_STATES = ("open", "supported", "contradicted", "reproduced", "superseded")
-RESEARCH_RELATIONS = ("supports", "contradicts", "depends on", "variant of", "same cause as", "follows from")
+RESEARCH_STATES = ("open", "supported", "contradicted", "superseded")  # a frame; a claim; ruled out; dropped
 GATE_VERDICTS = ("passed", "failed", "known", "error")  # known: a refuter cited where it was already reported; error: the gate could not run, or ran out of time
 GATE_TRIES = 3  # how many times a gate that could not run is run again before the claim is left there
 BOOT = time.time_ns()
@@ -81,6 +78,8 @@ def load(project):
                         event = json.loads(line)
                     except ValueError:
                         continue
+                    if isinstance(event, dict) and event.get("type") == "item" and event.get("section") == "round-notes":
+                        event["type"] = "note"  # how a round's note was kept before it had a type of its own
                     if isinstance(event, dict) and event.get("type") in TYPES:  # older logs hold kinds of report that no longer exist
                         out.append(event)
             EVENTS[project] = out
@@ -234,12 +233,9 @@ def ingest(data):
             raise ValueError("data.frame and data.cwd must be text")
         event["data"] = data["data"]
 
-    if type == "item":
-        if not event.get("section") or not event.get("key"):
-            raise ValueError("an item needs a section and a key")
-    elif type == "topic":  # one page in the Library; sending the same key again replaces it
-        if not event.get("key") or not (event.get("body") or event["text"]):
-            raise ValueError("a topic needs a key (its title) and a body")
+    if type == "note":
+        if not event.get("key") or not event.get("body"):
+            raise ValueError("a note needs a key (which round) and a body (what the round printed at its end)")
     elif type == "research" and data.get("source") == "gate":  # one gate's verdict on what a thread claims; nothing else about it changes
         cfg = config(project)
         if not event.get("id") or data.get("verdict") not in GATE_VERDICTS or not any(g["name"] == data.get("gate") for g in gates_of(cfg)):
@@ -252,7 +248,7 @@ def ingest(data):
         event = {"type": type, "id": event["id"], "gate": data["gate"], "verdict": data["verdict"], "detail": str(data.get("detail") or "")[-4000:],
                  "checked": str(data.get("checked") or "")[:300], "fp": seal, "source": "gate",
                  **({"rating": data["rating"]} if data.get("rating") in (1, 2, 3, 4, 5) and not isinstance(data.get("rating"), bool) else {})}
-    elif type == "research" and data.get("source") == "you" and any(k in data for k in ("priority", "status", "score", "audited")) and not any(k in data for k in ("kind", "text")):
+    elif type == "research" and data.get("source") == "you" and any(k in data for k in ("priority", "status", "score", "audited")) and "text" not in data:
         # the person's mark alone (Pursue, Drop, Reopen, a score, their audit): the thread's claim, evidence and history stay as they were
         if not event.get("id") or any(k in data and not isinstance(data[k], bool) for k in ("priority", "audited")) \
                 or ("status" in data and data["status"] not in ("open", "superseded", "contradicted")) \
@@ -263,19 +259,16 @@ def ingest(data):
             seen = next((n for n in research(project) if n["id"] == event["id"]), {})
             event.update(audit_fp=fingerprint(project, config(project)), audit_artifact=seen.get("artifact") or "")
     elif type == "research":
-        if ("verdict" in data or "gate" in data) and "kind" not in data:
+        if "verdict" in data or "gate" in data:
             raise ValueError("a gate's verdict is recorded by the loop when it runs the gate; it is not something to report")
         if data.get("source") == "you" and data.get("priority") is not None:  # an agent copying the mark back changes nothing
             if not isinstance(data["priority"], bool):
                 raise ValueError("priority must be true or false")
             event["priority"] = data["priority"]
-        if data.get("kind") not in RESEARCH_KINDS:
-            raise ValueError("research kind must be one of: " + ", ".join(RESEARCH_KINDS))
         if data.get("status") not in RESEARCH_STATES:
             raise ValueError("research status must be one of: " + ", ".join(RESEARCH_STATES))
         if not event["text"]:
             raise ValueError("research needs a short claim in text")
-        event["kind"] = data["kind"]
         if data.get("score") is not None:  # how many rounds a frame is worth
             if data["score"] not in (1, 2, 3, 4, 5) or isinstance(data["score"], bool):
                 raise ValueError("score must be a whole number from 1 to 5")
@@ -288,18 +281,6 @@ def ingest(data):
         for field in ("next", "conditions"):
             if field in data:
                 event[field] = str(data[field] or "")[:2000]
-        links = data.get("links", [])
-        evidence = data.get("evidence", [])
-        if not isinstance(links, list) or len(links) > 20 or not isinstance(evidence, list) or len(evidence) > 20:
-            raise ValueError("research links and evidence must be lists of at most 20 entries")
-        if not all(isinstance(x, dict) and isinstance(x.get("to"), str) and x.get("relation") in RESEARCH_RELATIONS for x in links):
-            raise ValueError("each research link needs a target id and a known relation")
-        if not all(isinstance(x, dict) and isinstance(x.get("ref"), str) for x in evidence):
-            raise ValueError("each evidence entry needs a ref")
-        if "links" in data:
-            event["links"] = [{"to": x["to"][:80], "relation": x["relation"]} for x in links]
-        if "evidence" in data:
-            event["evidence"] = [{"ref": x["ref"][:500], "note": str(x.get("note") or "")[:1000]} for x in evidence]
     elif type == "activity" and not event["text"]:
         raise ValueError("text is required")
 
@@ -322,7 +303,7 @@ def ingest(data):
         events.append(event)
         if type in KEYED:
             IDS[project].add((type, event["id"]))
-    if type == "item" and event["section"] == "round-notes":
+    if type == "note":
         from_handoff(project, event)  # the agent only writes its handoff; the record is kept from it here
     return event
 
@@ -364,8 +345,7 @@ def handoff_items(block):
 
 
 def from_handoff(project, note):
-    """Keep what a round reported in its handoff: the Project brief's current update, a thread per result, ruled-out
-    approach and lead, and each thing it assumed in the person's place. A round note without a Handoff marker records
+    """Keep what a round reported in its handoff: a thread per result, ruled-out approach and lead, and each thing it assumed in the person's place. A round note without a Handoff marker records
     nothing, and says so in the log."""
     body = note.get("body") or note.get("text") or ""
     # A harness that echoes its prompt prints the template too ("Handoff: <what you did ...>"); that is not a handoff.
@@ -375,7 +355,6 @@ def from_handoff(project, note):
         ingest({"project": project, "type": "activity", "agent": agent, "text": "A round ended without a Handoff block: nothing was recorded from it"})
         return
     block = body[marks[-1].start():].strip()
-    ingest({"project": project, "type": "item", "section": "now", "key": "Current update", "body": block, "agent": agent, "origin": "handoff"})
     seen = {plain(n.get("text") or ""): n["id"] for n in research(project)}
     parts = handoff_items(block)
     asked = {plain(q.get("text") or "") for q in merged(load(project), "question").values() if not q.get("answer")}
@@ -387,9 +366,9 @@ def from_handoff(project, note):
     # with a repaired artifact, or rule it out), and a claim the person marked.
     waiting = {n["id"]: n for n in research(project) if n["frame"] or n["state"] in ("error", "waiting", "unchecked") or (n["state"] == "failed" and n["gates"][n["at"]].get("verdict") != "known")}
     where = {"folder": data["cwd"]} if isinstance(data.get("cwd"), str) and data["cwd"] else {}  # where the round's artifacts are
-    for section, kind_, status_ in (("results", "conclusion", "supported"), ("ruled out", "observation", "contradicted"), ("leads", "hypothesis", "open")):
+    for section, status_ in (("results", "supported"), ("ruled out", "contradicted"), ("leads", "open")):
         for line in parts[section]:
-            label, kind, status = section, kind_, status_
+            label, status = section, status_
             # Tags first, in any order, and only then the length limit, so a long line never loses what it named.
             named_artifact, worth = CHECK_TAG.search(line), SCORE_TAG.search(line)
             line = SCORE_TAG.sub("", CHECK_TAG.sub("", line)).strip()
@@ -401,7 +380,7 @@ def from_handoff(project, note):
             extra = {"known": "new" if tag.group(1).lower() == "new" else (tag.group(2) or "").strip() or "known"} if tag else {}
             extra.update({"score": min(4, int(worth.group(1)))} if worth and label == "leads" else {})  # 5 is the person's to give
             if extra.get("known", "new") != "new":  # the round says it is already known: that is not a result, and no gate needs to say so
-                label, kind, status = "ruled out", "observation", "contradicted"
+                label, status = "ruled out", "contradicted"
                 text, artifact, extra = text, {}, {"conditions": "already known: " + extra["known"]}
             # A line that starts with a waiting thread's id, as [id], settles that thread in place, so it leaves the work
             # list: a result makes it a claim, a ruled-out line closes it with the reason. An id elsewhere in the line is prose.
@@ -410,13 +389,12 @@ def from_handoff(project, note):
             if named:
                 said = text[first.end():].strip() or text
                 if label == "ruled out":
-                    ingest({"project": project, "type": "research", "id": named["id"], "text": named.get("text", ""), "agent": agent,
-                            "kind": named.get("kind") or "hypothesis", "status": "contradicted", "conditions": (extra.get("conditions", "") + " " + said).strip()[:2000]})
+                    ingest({"project": project, "type": "research", "id": named["id"], "text": named.get("text", ""), "agent": agent, "status": "contradicted", "conditions": (extra.get("conditions", "") + " " + said).strip()[:2000]})
                     continue
                 # Claimed, or claimed again: every gate is still to come, on the artifact it names now (or the one it had).
                 # A frame was a place to look, so the claim's own words replace it; a claim keeps its words and gains a note.
                 was_frame = named.get("status") == "open"
-                ingest({"project": project, "type": "research", "id": named["id"], "agent": agent, "kind": "conclusion", "status": "supported", **extra, **where,
+                ingest({"project": project, "type": "research", "id": named["id"], "agent": agent, "status": "supported", **extra, **where,
                         "artifact": artifact.get("artifact") or named.get("artifact") or "",
                         **({"text": said, "found_in": named.get("text", "")[:300]} if was_frame else {"text": named.get("text", ""), "body": said})})
                 continue
@@ -424,9 +402,9 @@ def from_handoff(project, note):
                 same = next((n for n in research(project) if n["id"] == seen[plain(text)]), None) if artifact else None
                 if same and same.get("status") not in ("contradicted", "superseded"):  # the same claim, now with something to check
                     ingest({"project": project, "type": "research", "id": same["id"], "text": same.get("text", ""), "agent": agent,
-                            "kind": same.get("kind") or kind, "status": same.get("status") or status, **artifact, **where})
+                            "status": same.get("status") or status, **artifact, **where})
                 continue
-            made = ingest({"project": project, "type": "research", "kind": kind, "status": status, "text": text, "agent": agent, "origin": "handoff",
+            made = ingest({"project": project, "type": "research", "status": status, "text": text, "agent": agent, "origin": "handoff",
                            **extra, **artifact, **(where if label == "results" else {})})
             seen[plain(text)] = made["id"]
     # The round was given one frame. If it ends with the frame still open, its Next line is where the next round on that
@@ -434,8 +412,7 @@ def from_handoff(project, note):
     given = data.get("frame") if isinstance(data.get("frame"), str) else None
     still = next((n for n in research(project) if n["id"] == given and n["frame"]), None) if given and parts["next"] else None
     if still and plain(parts["next"][0]) != plain(still.get("next") or ""):
-        ingest({"project": project, "type": "research", "id": still["id"], "text": still.get("text", ""), "agent": agent,
-                "kind": still.get("kind") or "hypothesis", "status": still.get("status") or "open", "next": parts["next"][0][:2000]})
+        ingest({"project": project, "type": "research", "id": still["id"], "text": still.get("text", ""), "agent": agent, "status": still.get("status") or "open", "next": parts["next"][0][:2000]})
 
 
 def add_frames(data):
@@ -452,8 +429,8 @@ def add_frames(data):
         if plain(str(one["text"])) in seen:
             continue
         seen.add(plain(str(one["text"])))
-        added.append(ingest({"project": project, "type": "research", "kind": "hypothesis", "status": "open", "origin": "queue", "agent": data.get("agent"),
-                             **{k: one[k] for k in ("text", "score", "area", "next", "scope") if one.get(k) is not None}})["id"])
+        added.append(ingest({"project": project, "type": "research", "status": "open", "origin": "queue", "agent": data.get("agent"),
+                             **{k: one[k] for k in ("text", "score", "area", "next") if one.get(k) is not None}})["id"])
     return {"added": added, "skipped": len(given) - len(added)}
 
 
@@ -540,7 +517,7 @@ def rater_brief(cfg, n, gate):
 def assess(n, gates):
     """Where a claim stands against the gates: how many it is through in order ("standing"), and what is stopping it.
     A rater stops nothing: a claim through every other gate is established, and "rate" names the rater still due on it."""
-    if not gates or n.get("status") not in ("supported", "reproduced"):  # a frame or a dead end is not a claim
+    if not gates or n.get("status") != "supported":  # a frame or a dead end is not a claim
         return {"standing": 0, "state": None, "at": None, "rate": None}
     for count, gate in enumerate(gates):
         got = (n.get("gates") or {}).get(gate["name"])
@@ -576,11 +553,11 @@ def merged(events, type):
     return out
 
 
-THREAD_KEYS = ("ts", "agent", "source", "text", "kind", "status", "area", "scope", "snapshot", "body", "conditions", "next", "evidence", "links", "priority",
+THREAD_KEYS = ("ts", "agent", "source", "text", "status", "area", "body", "conditions", "next", "priority",
                "known", "origin", "artifact", "score", "audited", "gate", "verdict", "detail", "checked", "found_in")
 VERDICT_KEYS = ("verdict", "detail", "checked", "fp", "ts", "rating")
 MARK_KEYS = ("priority", "status", "score", "audited", "audit_fp", "audit_artifact")
-STARTED = re.compile(r"Iteration \d+ started")
+STARTED = re.compile(r"(?:Round|Iteration) \d+ started")
 
 
 def research(project, query="", area=""):
@@ -604,7 +581,7 @@ def research(project, query="", area=""):
                     nodes[e["id"]] = {**old, "history": [*old["history"], update], "gates": {**old.get("gates", {}), e.get("gate"): {
                         **{k: e.get(k) for k in VERDICT_KEYS}, "tries": (before.get("tries", 1) if again else 0) + 1 if e.get("verdict") == "error" else 0}}}
                 continue
-            if "kind" not in e:  # the person's mark or status change alone: it changes only that, and does not make the thread look recently worked on
+            if e.get("source") == "you" and "text" not in e:  # the person's mark or status change alone: it changes only that, and does not make the thread look recently worked on
                 if old:
                     nodes[e["id"]] = {**old, **{k: e[k] for k in MARK_KEYS if k in e}, "history": [*old["history"], update]}
                     if e.get("priority") is True:
@@ -630,11 +607,22 @@ def research(project, query="", area=""):
         # in the brief, where any round may repair it; the person's mark is what gives it a round of its own.
         n["frame"] = not settled and (n.get("status") == "open" or (n["priority"] and (n["state"] == "unchecked" or (n["state"] == "failed" and not known))))
         n["stalled"] = n["frame"] and n["attempts"] >= n["budget"]
+        for g in gates:  # whether each verdict still counts, so nothing that shows the record has to compare fingerprints
+            got = (n.get("gates") or {}).get(g["name"])
+            if got:
+                got["live"] = got.get("fp") == g["fp"] and (got.get("checked") or "") == (n.get("artifact") or "")
+        # The one group each thread is in, said once, here.
+        n["bucket"] = ({"established": "established", "failed": "stopped", "error": "stopped", "waiting": "waiting"}.get(n["state"], "unchecked") if n.get("status") == "supported"
+                       else "ruled" if n.get("status") == "contradicted" else "dropped" if settled else "aside" if n["stalled"] else "queued")
+    order = {n["id"]: i + 1 for i, n in enumerate(queue(out))}
+    on = rounds_on(project)
+    for n in out:
+        n["place"], n["working"] = order.get(n["id"]), on.get(n["id"])
     if area:
         out = [n for n in out if n.get("area") == area]
     if query:
         q = query.lower()
-        out = [n for n in out if q in " ".join(str(n.get(k) or "") for k in ("id", "text", "body", "conditions", "next", "area", "scope", "snapshot")).lower()]
+        out = [n for n in out if q in " ".join(str(n.get(k) or "") for k in ("id", "text", "body", "conditions", "next", "area")).lower()]
     out.sort(key=lambda n: (n["priority"], n["_i"]), reverse=True)  # what the person marked first, then the most recently worked on
     for n in out:
         n.pop("_i", None)
@@ -642,38 +630,15 @@ def research(project, query="", area=""):
 
 
 def thread_lines(n):
-    """One research thread as a fresh round should see it: the claim, where it applies, its next test and evidence."""
-    out = [f'- [{n["id"]}] {n.get("kind", "claim")} / {n.get("status", "open")}: {n.get("text", "")}' + (f' (area: {n["area"]})' if n.get("area") else "")]
-    if n.get("scope") or n.get("snapshot"):
-        out += ["  Context: " + "; ".join(f"{k}={n[k]}" for k in ("scope", "snapshot") if n.get(k))]
-    if n.get("next"):
-        out += [f'  Next test: {n["next"][:300]}']
-    if n.get("evidence"):
-        out += ["  Evidence: " + "; ".join(x.get("ref", "") for x in n["evidence"][:3])]
-    return out
+    """One frame as a fresh round should see it: what it is, and its next test."""
+    return [f'- [{n["id"]}] {n.get("text", "")}' + (f' (area: {n["area"]})' if n.get("area") else ""), *([f'  Next test: {n["next"][:300]}'] if n.get("next") else [])]
 
 
 def steering(cfg, events):
-    """What the person has said that every round must follow: their standing direction, then what they told earlier rounds."""
+    """What the person has said that every round must follow: their standing direction."""
     out, direction = [], cfg.get("direction")
     if isinstance(direction, str) and direction.strip():
         out += ["THE PERSON'S CURRENT DIRECTION (it outranks your own choice of next step; follow it until they change it)", direction.strip(), ""]
-    said = [e for e in events if e["type"] == "activity" and e.get("source") == "you" and e.get("harness") == "terminal"][-5:]
-    if said:
-        out += ["WHAT THE PERSON SAID IN THE TERMINAL TO EARLIER ROUNDS (newest last; it still applies unless the direction above supersedes it)"]
-        for e in said:
-            words = (e.get("body") or e.get("text") or "").replace("\n", " ")
-            out.append(f'- {e.get("ts", "")[:16].replace("T", " ")} to {e.get("key") or "a worker"}: ' + words[:600] + (" ..." if len(words) > 600 else ""))
-        out.append("")
-    # An unattended loop can circle one idea all night. Rounds that end with nothing recorded are the sign.
-    quiet = 0
-    for e in reversed(events):
-        if e["type"] == "research" and e.get("source") != "you":
-            break
-        quiet += e["type"] == "activity" and bool(re.match(r"Iteration \d+ (finished|ended badly)", e.get("text") or ""))
-    if quiet >= 3:
-        out += [f"THE LAST {quiet} ROUNDS RECORDED NOTHING NEW (no result, ruled-out approach or lead).",
-                "Do not continue the same line of work. Name three different angles in your handoff and try the one least like the recent rounds.", ""]
     return out
 
 
@@ -727,17 +692,15 @@ def model_flag(command):
     return None
 
 
-LOOP_DEFAULTS = {"rounds": 4, "timeout_min": 0, "reply_wait": 120, "keep_background": False, "tools": "recipe", "workers": 1}  # research: no time limit
-WIDE_TOOLS = ["WebSearch", "WebFetch", "Task", "Agent"]  # web and subagents, by name: permission checks stay on and connectors stay refused
+LOOP_DEFAULTS = {"rounds": 4, "timeout_min": 0, "keep_background": False, "workers": 1, "spend": 0}  # research: no time limit
 LOOP_RULES = {  # what each loop setting may be, and how to say so when it is not
     "recipe": (lambda v: isinstance(v, str) and bool(NAME.match(v)), "a recipe name from launchers.json"),
     "model": (lambda v: isinstance(v, str) and bool(MODEL.match(v)), "1 to 80 letters, digits or . : - [ ] / @"),
     "rounds": (lambda v: isinstance(v, int) and not isinstance(v, bool) and 0 <= v <= 500, "a whole number from 0 (until stopped) to 500"),
     "timeout_min": (lambda v: isinstance(v, (int, float)) and not isinstance(v, bool) and 0 <= v <= 1440, "minutes from 0 (no limit) to 1440"),
-    "reply_wait": (lambda v: isinstance(v, int) and not isinstance(v, bool) and 0 <= v <= 3600, "whole seconds from 0 (never wait) to 3600"),
     "keep_background": (lambda v: isinstance(v, bool), "true or false"),
     "workers": (lambda v: isinstance(v, int) and not isinstance(v, bool) and 1 <= v <= 4, "a whole number from 1 to 4: how many rounds run side by side, each on its own frame and in its own folder"),
-    "tools": (lambda v: v in ("recipe", "wide"), '"recipe" (the recipe\'s own list) or "wide" (also web search, web fetch and subagents)'),
+    "spend": (lambda v: isinstance(v, int) and not isinstance(v, bool) and 0 <= v <= 10000, "a whole number from 0 (no limit) to 10000: the most model rounds one launch may use, research and checking together"),
 }
 
 
@@ -763,7 +726,7 @@ def clean_loop(given, strict=True, keys=LOOP_RULES):
 
 
 def recipe_defaults(recipe):
-    """A recipe's own rounds, time limit, reply wait and background setting, with Hades's defaults where it sets none."""
+    """A recipe's own rounds, time limit and background setting, with Hades's defaults where it sets none."""
     return {**LOOP_DEFAULTS, **clean_loop(recipe, strict=False, keys=tuple(LOOP_DEFAULTS))}
 
 
@@ -785,33 +748,14 @@ def with_model(command, model):
     raise ValueError("This recipe does not name a model. Add a model flag (for example --model) to its command in launchers.json, then choose the model again.")
 
 
-def with_tools(command):
-    """A Claude Code recipe's command with web search, web fetch and subagents added to its allow-list, for this launch only.
-    Another program's command is returned as it is: its tools are whatever its own recipe says."""
-    out = list(command)
-    if not is_claude(out):
-        return out
-    for i, part in enumerate(out):
-        if part in ("--allowedTools", "--allowed-tools"):
-            return out[:i + 1] + [t for t in WIDE_TOOLS if t not in out] + out[i + 1:]
-        if part.startswith(("--allowedTools=", "--allowed-tools=")):
-            return out[:i] + [part + "".join("," + t for t in WIDE_TOOLS if t not in part.split("=", 1)[1].split(","))] + out[i + 1:]
-    return out + ["--allowedTools", *WIDE_TOOLS]
-
-
 def launchers():
-    """Each recipe as the page offers it: label, its own model, the models to choose from, live or batch, and the command."""
-    try:
-        from scripts.loop import can_converse
-    except ImportError:
-        can_converse = lambda command: False
+    """Each recipe as the page offers it: label, its own model, the models to choose from, and the command."""
     out = {}
     for k, v in recipes().items():
         models = v.get("models") if isinstance(v.get("models"), list) else None
         out[k] = {"label": str(v.get("label") or k), "model": recipe_model(v["command"]),
                   "models": [str(x) for x in models if isinstance(x, str)] if models is not None else ["fable", "opus", "sonnet", "haiku"] if is_claude(v["command"]) else [],
-                  "interactive": v.get("interactive") is not False and can_converse(v["command"]), "command": v["command"],
-                  "takes_tools": is_claude(v["command"]), **recipe_defaults(v)}
+                  "command": v["command"], **recipe_defaults(v)}
     return out
 
 
@@ -831,7 +775,7 @@ def launched(project=None):
                     continue
             if project in (None, key[0]):
                 out.append({"project": key[0], "agent": key[1], "recipe": r["recipe"], "alive": alive, "started": r["started"], "session": r["session"],
-                            "interactive": r["interactive"], "model": r.get("model", ""), "settings": r.get("settings", {})})
+                            "model": r.get("model", ""), "settings": r.get("settings", {})})
     return out
 
 
@@ -882,14 +826,9 @@ def launch(data):
     settings = {k: asked.get(k, saved.get(k, v)) for k, v in recipe_defaults(recipe).items()}
     model = asked.get("model") or saved.get("model")
     base = with_model(recipe["command"], model) if model else recipe["command"]
-    if settings["tools"] == "wide" and is_claude(base):
-        base = with_tools(base)
-    else:
-        settings["tools"] = "recipe"  # another program's tools are whatever its own recipe says
     settings["model"], rounds = recipe_model(base), settings["rounds"]
     program = resolve_program(base)  # "claude" may be claude.cmd on Windows; the loop gets the path that will start
-    from scripts.loop import can_converse  # a direct `claude -p` round can be watched and messaged while it runs
-    interactive = recipe.get("interactive") is not False and can_converse(base)
+    share = max(1, settings["spend"] // settings["workers"]) if settings["spend"] else 0  # the launch's limit, split between its loops
     # Each worker is a loop of its own, named for the notes and the folder it keeps, so a later launch of the same recipe remembers
     # them. Side by side they share the record and nothing else: each takes a different frame and runs the gates on its own claims.
     agents = [f"{name}-{i + 1}" for i in range(settings["workers"])]
@@ -910,8 +849,8 @@ def launch(data):
             env = {k: v for k, v in os.environ.items() if k not in ("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT")}
             env["PROJECT_VIEW_URL"] = f"http://127.0.0.1:{PORT}"
             command = [sys.executable, str(ROOT / "scripts" / "loop.py"), project, "--agent", agent, "--harness", str(recipe.get("label") or name),
-                       "--max-iterations", str(rounds), "--timeout-min", f'{settings["timeout_min"]:g}', "--reply-wait", str(settings["reply_wait"]),
-                       *(["--keep-background"] if settings["keep_background"] else []), *(["--interactive"] if interactive else []), "--"] + program
+                       "--max-iterations", str(rounds), "--timeout-min", f'{settings["timeout_min"]:g}', "--max-spend", str(share),
+                       *(["--keep-background"] if settings["keep_background"] else []), "--"] + program
             session = uuid.uuid4().hex
             env["HADES_LAUNCH_SESSION"] = session
             env["HADES_DETAILS_DB"] = str((ROOT / "agent-work" / ".hades" / "invocations.sqlite3").resolve())
@@ -921,18 +860,16 @@ def launch(data):
                     if not os.path.samestat(os.fstat(log.fileno()), os.fstat(console.fileno())):
                         raise OSError("terminal log changed while opening it")
                     start_offset = console.seek(0, os.SEEK_END)
-                    proc = subprocess.Popen(command, cwd=work, env=env, stdin=subprocess.PIPE if interactive else subprocess.DEVNULL,
+                    proc = subprocess.Popen(command, cwd=work, env=env, stdin=subprocess.DEVNULL,
                                             stdout=log, stderr=subprocess.STDOUT, **own_group())
                 except BaseException:
                     console.close()
                     raise
-            if interactive and not WINDOWS:
-                os.set_blocking(proc.stdin.fileno(), False)  # a worker that stops reading must not stall the server; tell() waits with a deadline
             (work / "loop.pid").write_text(f"{proc.pid}\n")  # survives a restart of this server, so the loop can still be found
             previous = RUNNING.get((project, agent))
             if previous:
                 previous["console"].close()
-            RUNNING[(project, agent)] = {"proc": proc, "recipe": name, "session": session, "console": console, "interactive": interactive, "pipe": threading.Lock(),
+            RUNNING[(project, agent)] = {"proc": proc, "recipe": name, "session": session, "console": console,
                                          "model": settings["model"], "settings": settings,
                                          "start_offset": start_offset, "started": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")}
     return {"started": agents, "rounds": rounds, "recipe": name, "model": settings["model"], "settings": settings}
@@ -990,26 +927,6 @@ def is_loop(shown, project, agent, windows=WINDOWS):
     return "loop.py" in shown and f" {project} --agent {agent} " in shown
 
 
-def write_within(stream, payload, seconds):
-    """Write and flush on a helper thread, waiting at most `seconds`. Returns (bytes not known to be written, the thread if
-    it is still blocked, else None)."""
-    failed = []
-
-    def write():
-        try:
-            stream.write(payload)
-            stream.flush()
-        except (OSError, ValueError) as e:
-            failed.append(e)
-
-    worker = threading.Thread(target=write, daemon=True)
-    worker.start()
-    worker.join(max(0.0, seconds))
-    if failed:
-        raise OSError(failed[0])
-    return (payload, worker) if worker.is_alive() else (b"", None)
-
-
 def worked(project):
     """The names of every agent that has a working folder on this project."""
     folder = ROOT / "agent-work" / project
@@ -1046,45 +963,6 @@ def forget_pid(project, agent, pid):
         pass
 
 
-def tell(data):
-    """Pass the person's message to a launched worker. Its loop hands it to the Claude session it is running."""
-    project, agent, text = check_name(data.get("project")), data.get("agent"), data.get("text")
-    if not isinstance(text, str) or not 0 < len(text.strip()) <= 4000:
-        raise ValueError("Enter a message of up to 4,000 characters.")
-    with LOCK:
-        record = RUNNING.get((project, agent)) if isinstance(agent, str) else None
-        if not record or record["session"] != data.get("session") or not record["interactive"]:
-            raise ValueError("This worker has no live Claude session to message.")
-    # Written outside the server-wide lock and with a deadline: a worker that has stopped reading must not freeze every request
-    payload, deadline = (json.dumps({"text": text.strip()}) + "\n").encode(), time.time() + 5
-    with record["pipe"]:  # one message at a time per worker, so two never interleave in its pipe
-        try:
-            if record["proc"].poll() is not None:
-                raise OSError
-            if record.get("stuck") and record["stuck"].is_alive():  # an earlier message is still waiting to go in
-                raise TimeoutError
-            if WINDOWS:  # Windows pipes have no select: a writer thread waits instead, and one that hangs marks the worker
-                payload, record["stuck"] = write_within(record["proc"].stdin, payload, deadline - time.time())
-            else:
-                fd = record["proc"].stdin.fileno()
-                while payload and select.select([], [fd], [], max(0, deadline - time.time()))[1]:
-                    try:
-                        payload = payload[os.write(fd, payload):]
-                    except BlockingIOError:
-                        pass
-        except TimeoutError:
-            payload = b"unsent"
-        except (OSError, ValueError):  # a closed pipe, or a worker that has exited
-            raise ValueError("This worker has finished. Start it again to continue.") from None
-        if payload:
-            raise ValueError("This worker is not reading messages right now. Try again in a moment.")
-    # Kept in the log, so every later round hears it too, not only the session that was running
-    text = text.strip()
-    ingest({"project": project, "type": "activity", "source": "you", "harness": "terminal", "key": agent, "text": text,
-            **({"body": text} if len(text) > 2000 else {})})
-    return {"sent": True}
-
-
 def stop(data):
     """Stop the project's launched loop (or the one named). Ends the loop and whatever harness it is running, and waits a
     few seconds for it to go, so a Start that follows does not find it still winding down."""
@@ -1117,22 +995,6 @@ def stop(data):
     return {"stopped": stopped}
 
 
-VIEWS = {  # the pages a project can have besides the built-in ones
-    "note": 'one block of prose per key, replaced each time. Send {"section", "key", "body": "<text>"}',
-    "table": 'one row per key. Send {"section", "key", "data": {"<column>": value, ...}}',
-}
-STARTER_SECTIONS = [{"id": "now", "title": "Project brief", "view": "note"}]
-
-
-def clean_section(s):
-    if not isinstance(s, dict) or not NAME.match(str(s.get("id") or "")):
-        raise ValueError("a section needs an id made of letters, digits, dots, dashes or underscores")
-    out = {"id": str(s["id"]), "title": str(s.get("title") or s["id"])[:40], "view": s.get("view") if s.get("view") in VIEWS else "note"}
-    if isinstance(s.get("columns"), list):
-        out["columns"] = [str(x)[:40] for x in s["columns"][:12]]
-    return out
-
-
 def new_project(data):
     """Create a project that is ready to run: what to research, and optionally where the target lives."""
     project = check_name(data.get("project"))
@@ -1143,14 +1005,13 @@ def new_project(data):
         (PROJECTS / project / "project.json").write_text(json.dumps(
             {"goal": str(data.get("goal") or "").strip()[:2000],
              **({"target": str(data["target"]).strip()[:4000]} if str(data.get("target") or "").strip() else {}),
-             **({"agent_files": str(data["agent_files"])[:500]} if data.get("agent_files") else {}),
-             "sections": STARTER_SECTIONS}, indent=2) + "\n")
+             **({"agent_files": str(data["agent_files"])[:500]} if data.get("agent_files") else {})}, indent=2) + "\n")
         load(project)
     return public_config(project)
 
 
 def set_project(data, create=False):
-    """Set the goal, summary, rules, target, direction, pause, loop settings or sections."""
+    """Set the goal, rules, target, direction, pause or loop settings."""
     project = check_name(data.get("project"))
     if not create and not (PROJECTS / project).is_dir():
         raise ValueError("no such project")
@@ -1177,13 +1038,6 @@ def set_project(data, create=False):
             cfg["direction"] = data["direction"].strip()
             if not cfg["direction"]:
                 del cfg["direction"]
-        if isinstance(data.get("sections"), list):
-            cfg["sections"] = [clean_section(s) for s in data["sections"][:12]]
-        if data.get("section") is not None:
-            one = clean_section(data["section"])
-            rest = [s for s in cfg.get("sections", []) if isinstance(s, dict) and s.get("id") != one["id"]]
-            was = next((i for i, s in enumerate(cfg.get("sections", [])) if isinstance(s, dict) and s.get("id") == one["id"]), len(rest))
-            cfg["sections"] = (rest[:was] + [one] + rest[was:])[:12]
         (PROJECTS / project).mkdir(parents=True, exist_ok=True)
         save_config(project, cfg)
         load(project)
@@ -1202,19 +1056,24 @@ def shown(command):
     return subprocess.list2cmdline(command) if WINDOWS else shlex.join(command)
 
 
+def rounds_on(project):
+    """frame id -> the agent whose round is on it right now."""
+    on, live = {}, working(project)
+    for e in load(project):
+        if e["type"] == "activity" and e.get("agent"):
+            if STARTED.match(e.get("text") or ""):
+                on[e["agent"]] = (e.get("data") or {}).get("frame") if isinstance(e.get("data"), dict) else None
+            elif re.match(r"(?:Round|Iteration) \d+ (finished|ended badly)|Loop stopped", e.get("text") or ""):
+                on.pop(e["agent"], None)
+    return {f: a for a, f in on.items() if f and a in live}
+
+
 HELD = {}  # (project, frame id) -> (agent, when): a frame just handed to a loop, until its round is seen to start
 
 
 def in_flight(project, events, agent):
     """The frames other loops are on right now, so two rounds side by side never take the same one."""
-    on = {}
-    for e in events:
-        if e["type"] == "activity" and e.get("agent"):
-            if STARTED.match(e.get("text") or ""):
-                on[e["agent"]] = (e.get("data") or {}).get("frame") if isinstance(e.get("data"), dict) else None
-            elif re.match(r"Iteration \d+ (finished|ended badly)|Loop stopped", e.get("text") or ""):
-                on.pop(e["agent"], None)
-    busy = {f for a, f in on.items() if f and a != agent and a in working(project)}
+    busy = {f for f, a in rounds_on(project).items() if a != agent}
     return busy | {f for (p, f), (a, when) in list(HELD.items()) if p == project and a != agent and time.time() - when < 120}
 
 
@@ -1222,8 +1081,8 @@ def plan(project, agent, hold=False):
     """(the brief, the id of the frame it gives the round or None). The model does the research; the harness keeps the
     record from its closing handoff, so every line here is about the work."""
     cfg, events = config(check_name(project)), list(load(project))
-    update = next((e for e in reversed(events) if e["type"] == "item" and e.get("section") == "now" and e.get("key") == "Current update"), {})
-    notes = [e for e in events if e["type"] == "item" and e.get("section") == "round-notes" and e.get("agent") == agent and e.get("body")]
+    update = next((e for e in reversed(events) if e["type"] == "note" and e.get("agent") != agent and HANDOFF.search(e.get("body") or "")), {})  # what another loop last said
+    notes = [e for e in events if e["type"] == "note" and e.get("agent") == agent and e.get("body")]
     claims, gates = research(project), gates_of(cfg)
     ruled = [f'- {n.get("text", "")[:300]}' + (f' (why: {n["conditions"][:200]})' if n.get("conditions") else "")
              for n in claims if n.get("status") == "contradicted"][:20]
@@ -1276,8 +1135,8 @@ def plan(project, agent, hold=False):
         out += ["", "ASSUMPTIONS IN FORCE (earlier rounds made them in the person's place; keep to them, and do not raise them again, "
                 "unless one contradicts the goal or the rules: then follow those and say so on the Assumed line)",
                 *[f'- {words.get(q["id"], "")[:300]}' for q in waiting]]
-    if update and (update.get("agent") != agent or not recall):
-        out += ["", "WHERE THINGS STAND (the dashboard's current update)", (update.get("body") or update.get("text") or "")[-2000:]]
+    if update:
+        out += ["", f'THE LATEST HANDOFF FROM ANOTHER LOOP ({update.get("agent")})', update["body"][HANDOFF.search(update["body"]).start():][:2000]]
     title = lambda n: f'- [{n["id"]}] {n.get("text", "")[:200]}' + (" (the person's priority)" if n["priority"] else "")
     by = {g["name"]: g for g in gates}
 
@@ -1337,7 +1196,7 @@ def status(project, base):
     line, ago = queue(claims), _ago
     runs = launched(project)
     alive = next((r for r in runs if r["alive"]), None)
-    marks = [(i, e) for i, e in enumerate(events) if e["type"] == "activity" and re.match(r"(Iteration \d+ (started|finished|ended badly)|Loop stopped|A round ended without)", e.get("text") or "")]
+    marks = [(i, e) for i, e in enumerate(events) if e["type"] == "activity" and re.match(r"((?:Round|Iteration) \d+ (started|finished|ended badly)|Loop stopped|A round ended without)", e.get("text") or "")]
     began = next(((i, e) for i, e in reversed(marks) if STARTED.match(e["text"])), None)
     stopped = next((e for _, e in reversed(marks) if e["text"].startswith("Loop stopped")), None)
     silent = next((i for i, e in reversed(marks) if e["text"].startswith("A round ended without")), -1)
@@ -1345,7 +1204,7 @@ def status(project, base):
     if began:
         i, last = began
         over = any(j > i and not e["text"].startswith("A round ended without") for j, e in marks)  # finished, ended badly, or the loop stopped
-        noted = any(j > i and e["type"] == "item" and e.get("section") == "round-notes" and e.get("agent") == last.get("agent") for j, e in enumerate(events))
+        noted = any(j > i and e["type"] == "note" and e.get("agent") == last.get("agent") for j, e in enumerate(events))
         given = (last.get("data") or {}).get("frame")
         on = next((n for n in claims if n["id"] == given), None)
         doing = ("Last round: " if over or not alive else "Round ended, its gates are running now (a refuter is a full round of the model): " if noted else "Round in progress: ") \
@@ -1365,7 +1224,7 @@ def status(project, base):
            f'Spent: {sum(1 for _, e in marks if STARTED.match(e["text"]))} research rounds and '
            f'{sum(1 for e in events if e["type"] == "research" and e.get("source") == "gate" and "command" not in gate_by.get(e.get("gate"), {"command": 1}))} checking rounds (refuters and raters), for {len(by("established"))} established.',
            f'Counts: {len(by("established"))} established, {len(by("failed")) + len(by("error"))} stopped at a gate, {len(by("waiting"))} waiting for a gate, '
-           f'{len([n for n in live if n.get("status") in ("supported", "reproduced") and n["state"] in (None, "unchecked")])} claimed and unchecked, '
+           f'{len([n for n in live if n.get("status") == "supported" and n["state"] in (None, "unchecked")])} claimed and unchecked, '
            f'{len([n for n in claims if n.get("status") == "contradicted"])} ruled out, {len(line)} queued, {len([n for n in live if n["stalled"]])} set aside']
     if by("established"):
         out += ["", "ESTABLISHED (through every gate; the most important first, by the rater's word where there is one)",
@@ -1380,7 +1239,7 @@ def status(project, base):
             word = "could not run" if n["state"] == "error" else "says it is already known (it is not queued again)" if got.get("verdict") == "known" else "said no"
             out += [title(n), f'  passed {n["standing"]} of {len([g for g in gates if "rate" not in g])}; {n["at"]} {word}' + (f': {said[-1][:240]}' if said else "")]
     for heading, some in (("WAITING FOR A GATE (it runs after the next round)", by("waiting")),
-                          ("CLAIMED AND UNCHECKED (a round's word; no gate could run on it)", [n for n in live if n.get("status") in ("supported", "reproduced") and n["state"] in (None, "unchecked")])):
+                          ("CLAIMED AND UNCHECKED (a round's word; no gate could run on it)", [n for n in live if n.get("status") == "supported" and n["state"] in (None, "unchecked")])):
         out += ["", heading, *[title(n) + (f' (at {n["at"]})' if n.get("at") else "") + (" (marked by the person)" if n["priority"] else "") for n in some[:8]],
                 *([f"  and {len(some) - 8} more"] if len(some) > 8 else [])] if some else []
     if line:
@@ -1394,7 +1253,7 @@ def status(project, base):
         if e["type"] == "question" and e.get("text"):
             words.setdefault(e.get("id"), e["text"])
     out += ["", "ASSUMPTIONS IN FORCE (a round made each in the person's place; answer one to overrule it)", *[f'- [{q["id"]}] {words.get(q["id"], "")[:240]}' for q in held[-8:]]] if held else []
-    at, note = next(((i, e) for i, e in reversed(list(enumerate(events))) if e["type"] == "item" and e.get("section") == "now" and e.get("key") == "Current update"), (-1, None))
+    at, note = next(((i, e) for i, e in reversed(list(enumerate(events))) if e["type"] == "note" and HANDOFF.search(e.get("body") or "")), (-1, None))
     if note:  # its results, dead ends, assumptions and leads are all above as threads; what is left is what it did and what it would do next
         body, told = note.get("body") or note.get("text") or "", []
         for row in body.splitlines():
@@ -1489,18 +1348,6 @@ class Handler(BaseHTTPRequestHandler):
             traceback.print_exc()
             self.reply(500, {"error": f"server error: {type(e).__name__}: {e}"})
 
-    def own_page(self, header):
-        """True for a request made by this server's own page, open on this machine. Other sites cannot send these headers."""
-        host = self.headers.get("Host", "")
-        port = self.server.server_port
-        allowed = {f"{name}:{port}" for name in ("localhost", "127.0.0.1", "[::1]")}
-        if port == 80:
-            allowed.update(("localhost", "127.0.0.1", "[::1]"))
-        return (host in allowed and
-                self.headers.get("Origin") == "http://" + host and
-                self.headers.get(header) == "1" and
-                self.headers.get_content_type() == "application/json")
-
     def do_POST(self):
         # Every write starts or steers an agent that can run commands, so a web page open in the person's browser must not
         # be able to make one. A browser sends such a page's request with its Origin, and cannot send JSON across sites
@@ -1516,11 +1363,7 @@ class Handler(BaseHTTPRequestHandler):
             if not isinstance(data, dict):
                 raise ValueError("body must be a JSON object")
             path = urlparse(self.path).path
-            if path == "/api/terminal/send":  # the message reaches an agent that can run tools: this server's own page only
-                if not self.own_page("X-Hades-Terminal"):
-                    raise PermissionError("Open Hades on localhost to message this worker.")
-                out = tell(data)
-            elif path == "/api/events":
+            if path == "/api/events":
                 out = ingest(data)
             elif path == "/api/project":
                 out = set_project(data)
@@ -1534,8 +1377,6 @@ class Handler(BaseHTTPRequestHandler):
                 out = stop(data)
             else:
                 return self.reply(404, {"error": "not found"})
-        except PermissionError as e:
-            return self.reply(403, {"error": str(e)})
         except ValueError as e:
             return self.reply(400, {"error": str(e)})
         except Exception as e:
@@ -1549,7 +1390,7 @@ class Handler(BaseHTTPRequestHandler):
 
 def starter():
     """The first project on a fresh install, with no goal yet. The person types what to research on the page."""
-    return set_project({"project": "workspace", "goal": "", "sections": STARTER_SECTIONS}, create=True)
+    return set_project({"project": "workspace", "goal": ""}, create=True)
 
 
 def serve():

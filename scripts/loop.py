@@ -4,21 +4,19 @@
   python3 scripts/loop.py my-project --agent claude-1 -- claude -p
   python3 scripts/loop.py my-project --agent other-1  -- my-harness --prompt-file {brief_file}
 
-Each iteration starts the harness fresh, with the project's current brief as its prompt:
+Each round starts the harness fresh, with the project's current brief as its prompt:
   1. Stop if a limit is reached or a file named STOP exists here. Wait while the person has the project paused.
   2. Fetch the brief from the server (instructions plus where things stand right now).
   3. Run your command. The brief is sent on its standard input. In the arguments, {brief_file} is
      replaced with the path of a file holding it, and {brief} with the text itself.
-  4. Save what the harness printed to the project's "Round notes" page.
-  5. If the project has gates, run them in order on every result the round claimed with an artifact, and record each
-     verdict. A gate is a command (exit code 0 passes) or a refuter: this same harness, started fresh, shown only the
-     claim and asked to kill it. Gates run here, in this folder, after the round's harness has ended: the agent does
-     not report its own verdict.
+  4. Save the round's closing handoff as its note: the record is made from it.
+  5. Run every gate that is due on what the round claimed, and record each verdict. A gate is a command (exit code 0
+     passes), a refuter (a harness started fresh, shown only the claim and asked to kill it) or a rater. Gates run
+     here, after the round's harness has ended: the agent does not report its own verdict.
   6. Report how the round ended, then go again.
 
-With --interactive and a direct "claude -p" command, a round is a live conversation. The terminal shows Claude's
-text, tool calls and tool results as they happen, and each line typed on this program's standard input is sent to
-Claude as a message from the person. Claude receives it at its next step, in the same session.
+A direct "claude -p" command is shown as it works: its text, tool calls and tool results as they happen. Nothing is
+sent to a round after its brief.
 
 Everything after "--" is your harness command, exactly as you would type it. The harness needs to be
 allowed to do the project's work without asking; how you grant that is specific to the harness.
@@ -33,7 +31,6 @@ import shutil
 import signal
 import sqlite3
 import json
-import locale
 import os
 import queue
 import re
@@ -415,8 +412,7 @@ def run_harness(args, brief, timeout, env=None, keep=False, cwd=None):
     return (f"timeout after {timeout / 60:g} min" if timed_out.is_set() else code), tail.replace("\r\n", "\n")
 
 
-STREAM = ["--input-format", "stream-json", "--output-format", "stream-json", "--include-partial-messages", "--verbose"]
-EXIT_WAIT = 60  # seconds Claude gets to exit once its input has ended
+STREAM = ["--output-format", "stream-json", "--include-partial-messages", "--verbose"]
 HANDOFF = """When you finish, end your final response with this block. It is saved as your only memory of this round and recorded on the dashboard for you, so you do not need to report anything else.
 Handoff: <what you did and what you observed, in a few sentences>
 Results: <one line per result you are claiming, the strongest first and at most 8, or "none". If gates are listed above, end each with [check: <artifact>]. Add [new] if you looked and found no earlier statement of it>
@@ -426,42 +422,12 @@ Leads: <one line per new place worth looking, most promising first, each with it
 Next: <the single most useful next step>"""
 
 
-def can_converse(command):
-    """A direct `claude -p` that takes its prompt on standard input can hold a two-way session."""
+def streams(command):
+    """A direct `claude -p` that takes its prompt on standard input can report its work as it happens."""
     rest = command[1:]
     return (bool(command) and cli_name(command[0]) == "claude" and any(x in ("-p", "--print") for x in rest)
             and not any(x.split("=")[0] in ("--input-format", "--output-format") for x in rest)
             and not any("{brief" in x for x in command))
-
-
-def heard(raw):
-    try:
-        return raw.decode("utf-8")
-    except UnicodeDecodeError:  # a Windows console types in its own code page
-        return raw.decode(locale.getpreferredencoding(False), errors="replace")
-
-
-def listen(inbox):
-    """Queue each line of standard input as a message from the person. The dashboard sends JSON lines."""
-    pending, chunk = b"", b"\n"
-    while chunk:  # at the end of input (the server went away, or Ctrl-D) keep what was typed without a newline
-        try:  # read the descriptor itself: a thread waiting inside sys.stdin's buffer breaks interpreter shutdown
-            chunk = os.read(0, 65536)
-        except OSError:
-            chunk = b""
-        *lines, pending = (pending + chunk).split(b"\n") if chunk else (pending, b"")
-        for raw in lines:
-            text = heard(raw).strip()
-            if text.startswith("{"):
-                try:
-                    packet = json.loads(text)
-                    text = packet["text"].strip() if isinstance(packet, dict) and isinstance(packet.get("text"), str) else text
-                except ValueError:
-                    pass
-            if text:
-                inbox.put(text)
-                if not inbox.live:
-                    print("[loop] Message received. Claude gets it when the next round starts.", flush=True)
 
 
 class Screen:
@@ -473,7 +439,7 @@ class Screen:
         self.started, self.calls, self.last = False, {}, None
 
     def write(self, text):
-        with self.lock:  # Claude's stream and the person's messages reach the screen from different threads
+        with self.lock:
             if text:
                 sys.stdout.buffer.write(text.encode("utf-8", errors="replace"))
                 sys.stdout.buffer.flush()
@@ -536,70 +502,30 @@ class Screen:
                     self.streamed = False
 
 
-def run_conversation(args, brief, timeout, env, inbox, reply_wait=120, keep=False):
-    """Run one round as a live two-way session. Returns (exit code or reason, Claude's finished replies, statistics).
-    Once the person has spoken in the round, a finished turn stays open `reply_wait` seconds for their reply."""
+def run_stream(args, brief, timeout, env, keep=False):
+    """Run one round of a direct `claude -p`, showing its work as it happens. Returns (exit code or reason, Claude's
+    final reply, statistics). Nothing is sent to it after the brief."""
     proc = start(args, env)
-    family, screen, lock, done = Family(proc), Screen(), threading.Lock(), threading.Event()
-    state = {"open": True, "idle": 0.0, "spoke": False, "deadline": limit(timeout), "reason": None, "invited": False}
-    stats, used = {"tools": 0, "messages": 0}, set()
+    family, screen, done, timed_out = Family(proc), Screen(), threading.Event(), threading.Event()
+    stats, used = {"tools": 0}, set()
+    if env is not None:
+        record_input(env, "cli", args, brief.encode("utf-8"))
 
-    def close():  # once a finished turn's input ends, Claude exits 0; give it a short while to do so
-        with lock:
-            state.update(open=False, deadline=min(state["deadline"], time.time() + EXIT_WAIT))
-            try:
-                proc.stdin.close()
-            except OSError:
-                pass
-
-    def send(text, source=None):
-        payload = (json.dumps({"type": "user", "message": {"role": "user", "content": text}}) + "\n").encode("utf-8")
-        with lock:
-            if not state["open"]:
-                return False
-            try:
-                proc.stdin.write(payload)
-                proc.stdin.flush()
-            except OSError:
-                return False
-        if env is not None:
-            record_input(env, "cli", args, payload, *([source] if source else []))
-        return True
-
-    def attend():  # one thread delivers the person's messages, keeps time and ends the session when the talk is over
+    def guard(deadline=limit(timeout)):
         while not done.wait(0.2):
             family.watch()
-            now = time.time()
-            if now > state["deadline"] and not (state["open"] and state["idle"]):  # busy, or not exiting after its input ended
-                state["reason"] = f"timeout after {timeout / 60:g} min" if state["open"] else "did not exit after its session ended"
+            if time.time() > deadline:
+                timed_out.set()
                 return family.end()
-            if not state["open"]:
-                continue
-            try:
-                text = inbox.get_nowait()
-            except queue.Empty:
-                text = None
-            if text is not None:
-                if not send(text, "Message from the person during the round"):
-                    inbox.put(text)  # this session has closed: it opens the next round
-                    close()
-                    continue
-                state.update(idle=0.0, spoke=True, invited=False, deadline=limit(timeout))
-                stats["messages"] += 1
-                screen.line("\nYou: " + text.replace("\n", "\n     ") + "\n")
-            elif state["idle"]:
-                wait = reply_wait if state["spoke"] else 0
-                if wait and not state["invited"]:
-                    state["invited"] = True
-                    screen.line(f"\n[loop] Claude finished this turn. Reply within {wait:g} s to continue this conversation.")
-                # A finished turn waiting only for a reply ends cleanly at the time limit, rather than as a timeout.
-                if (now - state["idle"] >= wait or now > state["deadline"]) and inbox.empty():
-                    inbox.live = False  # from here on, a message waits for the next round, and the listener says so
-                    close()
+    threading.Thread(target=guard, daemon=True).start()
 
-    inbox.live = True
-    send(brief)
-    threading.Thread(target=attend, daemon=True).start()
+    def feed():
+        try:
+            proc.stdin.write(brief.encode("utf-8"))
+            proc.stdin.close()
+        except OSError:
+            pass
+    threading.Thread(target=feed, daemon=True).start()
     replies, results, failed = [], 0, False
     try:
         for raw in lines(read_output(proc)):
@@ -617,7 +543,6 @@ def run_conversation(args, brief, timeout, env, inbox, reply_wait=120, keep=Fals
                 failed = bool(packet.get("is_error"))
                 if failed and packet.get("result"):
                     screen.line(str(packet["result"]))
-                # Cost and turns count the whole session so far, so the last value stands; usage is per turn, so it adds up.
                 for field, key in (("total_cost_usd", "cost_usd"), ("num_turns", "turns")):
                     if isinstance(packet.get(field), (int, float)) and not isinstance(packet.get(field), bool):
                         stats[key] = packet[field]
@@ -627,10 +552,7 @@ def run_conversation(args, brief, timeout, env, inbox, reply_wait=120, keep=Fals
                     counts = [usage[f] for f in fields if isinstance(usage.get(f), int) and not isinstance(usage.get(f), bool)]
                     if counts:
                         stats[key] = stats.get(key, 0) + sum(counts)
-                state["idle"] = time.time()
             else:
-                if kind in ("assistant", "stream_event"):
-                    state.update(idle=0.0, invited=False)  # a message that arrived as the turn ended has started another
                 if kind == "assistant":
                     content = (packet.get("message") or {}).get("content")
                     for block in content if isinstance(content, list) else []:
@@ -642,20 +564,13 @@ def run_conversation(args, brief, timeout, env, inbox, reply_wait=120, keep=Fals
         family.end()
         raise
     finally:
-        inbox.live = False
         done.set()
-        with lock:  # no message can be written into a session that has ended
-            state["open"] = False
-            try:
-                proc.stdin.close()
-            except OSError:
-                pass
     code = proc.wait()
-    finish_round(family, keep, bool(state["reason"]))
+    finish_round(family, keep, timed_out.is_set())
     screen.line("")
     if "cost_usd" in stats:
         stats["cost_usd"] = round(stats["cost_usd"], 6)
-    outcome = state["reason"] or code or (1 if failed else 0 if results else "exited without a result")
+    outcome = (f"timeout after {timeout / 60:g} min" if timed_out.is_set() else None) or code or (1 if failed else 0 if results else "exited without a result")
     return outcome, ("\n\n".join(r for r in replies if r) or screen.tail).replace("\r\n", "\n"), stats
 
 
@@ -684,8 +599,9 @@ def run_gates(a, query, command):
             if not isinstance(item.get("command"), list):
                 # Every claim is settled before the next research round, so that round's brief carries the verdicts. A harness
                 # that twice gives no verdict is not one that can refute (a plain script, say): leave the rest due.
-                if silent >= 2:
+                if silent >= 2 or (a.max_spend and a.spent >= a.max_spend):
                     continue
+                a.spent += 1
             artifact, limit, rating = str(item.get("artifact") or ""), float(item.get("timeout_min") or 10) * 60, None
             # A gate runs in the folder the claim's round worked in, where its artifact was left, whichever loop runs it.
             where = item.get("cwd") if isinstance(item.get("cwd"), str) and os.path.isdir(item["cwd"]) else None
@@ -756,9 +672,8 @@ def run_loop():
     p.add_argument("--timeout-min", type=float, default=0, help="end one iteration after this many minutes (default 0: no limit)")
     p.add_argument("--pause", type=float, default=5, help="seconds between iterations (default 5)")
     p.add_argument("--no-notes", action="store_true", help="do not save each round's output to the project's Round notes page")
-    p.add_argument("--reply-wait", type=float, default=120, help="with --interactive: seconds a finished turn stays open for the person's reply once they have spoken in the round; 0 ends the round when Claude finishes (default 120)")
     p.add_argument("--keep-background", action="store_true", help="leave processes the agent started running between rounds; they still end when a round hits its time limit or the loop stops")
-    p.add_argument("--interactive", action="store_true", help="with a direct `claude -p` command: show Claude's work as it happens and send each line of standard input to it as a message")
+    p.add_argument("--max-spend", type=int, default=0, help="stop once this many model rounds have been used, research and checking rounds together (default: no limit)")
     # Split at the first "--" ourselves, so the harness command can contain any flags it likes.
     argv = sys.argv[1:]
     cut = argv.index("--") if "--" in argv else len(argv)
@@ -775,13 +690,7 @@ def run_loop():
         command = resolve(command)
     except ValueError as error:
         p.error(str(error))
-    inbox = None
-    if a.interactive and can_converse(command):
-        inbox = queue.Queue()
-        inbox.live = False
-        threading.Thread(target=listen, args=(inbox,), daemon=True).start()
-    elif a.interactive:
-        print("[loop] --interactive needs a direct `claude -p` command that reads its prompt on standard input; running rounds without it", flush=True)
+    live = streams(command)  # a direct `claude -p` reports its work as it happens; any other program's output is shown as it prints
     # The dashboard's Stop sends SIGTERM on POSIX; Ctrl-Break is its Windows console cousin. Either way the finally clauses
     # then end the round. (Killed outright on Windows, the loop's job handles close and take the round with them.)
     for name in ("SIGTERM", "SIGBREAK"):
@@ -791,30 +700,20 @@ def run_loop():
         f"up to {a.max_iterations} rounds" if a.max_iterations else "rounds until stopped",
         f"for at most {a.max_hours:g} hours" if a.max_hours else "",
         f"{a.timeout_min:g} min limit per round" if a.timeout_min else "no time limit per round",
-        (f"waits {a.reply_wait:g} s for your reply" if a.reply_wait else "reply wait off") if inbox else "",
+        f"at most {a.max_spend} model rounds in all" if a.max_spend else "",
         "keeps background processes between rounds" if a.keep_background else "stops background processes when a round ends",
         f"model {a.model}" if a.model else ""])), flush=True)
     query = urllib.parse.urlencode({"project": a.project, "agent": a.agent})
-    started, n, failures = time.time(), 0, 0
-    if not a.no_notes:
-        try:
-            call("/api/project", {"project": a.project, "section": {"id": "round-notes", "title": "Round notes", "view": "note"}})
-        except OSError:
-            pass
-
-    def finish(text):  # the listener promised these to a next round that will not come
-        left = []
-        while inbox and not inbox.empty():
-            left.append(inbox.get_nowait())
-        if left:
-            say(a, f"{len(left)} message(s) from the person arrived after the last round and were not delivered: " + " | ".join(left)[:1000])
-        return say(a, text)
+    started, n, failures, a.spent = time.time(), 0, 0, 0  # spent: model rounds used by this run, research and checking together
+    finish = lambda text: say(a, text)
 
     while True:
         if os.path.exists("STOP"):
             return finish("Loop stopped: found a STOP file")
         if a.max_iterations and n >= a.max_iterations:
-            return finish(f"Loop stopped: reached {a.max_iterations} iterations")
+            return finish(f"Loop stopped: reached {a.max_iterations} rounds")
+        if a.max_spend and a.spent >= a.max_spend:
+            return finish(f"Loop stopped: reached its spend limit of {a.max_spend} model rounds")
         if a.max_hours and time.time() - started > a.max_hours * 3600:
             return finish(f"Loop stopped: reached {a.max_hours:g} hours")
         try:
@@ -835,6 +734,7 @@ def run_loop():
             continue
 
         n += 1
+        a.spent += 1
         # Where it is working, and for how long: neither is in the record, and both change what a round should do.
         # The next round knows only the handoff and this folder, so both are where anything worth keeping has to go.
         brief += (f"\nYou are working in {os.getcwd()}. It persists: earlier rounds' files are here, the next round starts from what you leave "
@@ -845,16 +745,16 @@ def run_loop():
         brief += "\n\n" + HANDOFF
         with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".txt", prefix="brief-", delete=False) as f:
             f.write(brief)
-        say(a, f"Iteration {n} started", frame=frame)  # with a frame the round settles it; without one it widens
+        say(a, f"Round {n} started", frame=frame)  # with a frame the round settles it; without one it widens
         began, stats = time.time(), {}
         try:
             argv = [part.replace("{brief_file}", f.name).replace("{brief}", brief) for part in command]
-            if inbox:
+            if live:
                 argv = argv[:1] + STREAM + argv[1:]
             with tempfile.TemporaryDirectory(prefix="hades-launch-") as directory:
                 env = launch_env(a, n, argv, directory)
-                if inbox:
-                    code, output, stats = run_conversation(argv, brief, a.timeout_min * 60, env, inbox, a.reply_wait, a.keep_background)
+                if live:
+                    code, output, stats = run_stream(argv, brief, a.timeout_min * 60, env, a.keep_background)
                 else:
                     code, output = run_harness(argv, brief, a.timeout_min * 60, env, a.keep_background)
         except OSError as e:
@@ -864,7 +764,7 @@ def run_loop():
         stats = {"seconds": round(time.time() - began, 1), **stats}
         if output.strip() and not a.no_notes:  # keep the harness's own account of the round where the person can read it
             try:
-                call("/api/events", {"project": a.project, "type": "item", "section": "round-notes", "agent": a.agent, "harness": a.harness,
+                call("/api/events", {"project": a.project, "type": "note", "agent": a.agent, "harness": a.harness,
                                      "key": f"Round {n} · {a.agent} · {time.strftime('%Y-%m-%d %H:%M')}",
                                      "data": {"loop_session": a.session, "cwd": os.getcwd(), **({"frame": frame} if frame else {})}, "body": closing(output)})
             except OSError:
@@ -872,13 +772,13 @@ def run_loop():
             run_gates(a, query, command)
 
         if code == 0:
-            say(a, f"Iteration {n} finished (exit 0)", stats=stats)
+            say(a, f"Round {n} finished (exit 0)", stats=stats)
             failures = 0
             time.sleep(a.pause)
         else:  # back off, so a harness that fails instantly does not spin
             failures += 1
             wait = min(300, a.pause * 2 ** failures)
-            say(a, f"Iteration {n} ended badly ({code}); waiting {wait:g} s before the next", stats=stats)
+            say(a, f"Round {n} ended badly ({code}); waiting {wait:g} s before the next", stats=stats)
             time.sleep(wait)
 
 

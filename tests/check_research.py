@@ -57,7 +57,7 @@ def check(directory):
                "wrap": {"label": "Wrapper", "command": [*batch, "-m", "base-model"], "models": ["base-model", "other"], "rounds": 200},
                "bare": {"command": batch}, "broken": {"command": []}}
     (work / "launchers.json").write_text(json.dumps(recipes))
-    for project, cfg in (("plain", {"goal": "Find the parser bug", "sections": [], "gates": []}),  # "gates": [] turns the built-in refuter off
+    for project, cfg in (("plain", {"goal": "Find the parser bug", "gates": []}),  # "gates": [] turns the built-in refuter off
                          ("lean", {"target": "parser.c", "goal": "Find the parser bug", "rules": "Stay local.", "gates": []}),
                          ("blank", {"goal": ""}),
                          ("style", {"goal": "Map the parser", "gates": []}),
@@ -68,7 +68,7 @@ def check(directory):
     (work / "projects/old/events.jsonl").write_text("\n".join([
         json.dumps({"type": "run", "id": "r1", "text": "an attempt", "artifact": {}}), json.dumps({"type": "verdict", "run": "r1", "ok": True}),
         json.dumps({"type": "finding", "text": "a finding"}), json.dumps({"type": "task", "id": "t4", "text": "a task", "status": "queued"}),
-        "not json", json.dumps({"type": "research", "id": "k2", "kind": "hypothesis", "status": "open", "text": "Old lead"})]) + "\n")
+        "not json", json.dumps({"type": "research", "id": "k2", "status": "open", "text": "Old lead"})]) + "\n")
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
         port = sock.getsockname()[1]
@@ -105,7 +105,7 @@ def check(directory):
         # The old log: its research thread survives, the rest is left out, and a new thread never takes an id already in use.
         assert [e["type"] for e in call("/api/events?project=old")["events"]] == ["research"]
         assert next(p for p in call("/api/projects") if p["id"] == "old")["count"] == 1
-        fresh = call("/api/events", {"project": "old", "type": "research", "kind": "hypothesis", "status": "open", "text": "New lead"})
+        fresh = call("/api/events", {"project": "old", "type": "research", "status": "open", "text": "New lead"})
         assert fresh["id"] != "k2" and sorted(t["text"] for t in call("/api/research?project=old")) == ["New lead", "Old lead"], fresh
         assert "A project from before" in brief("old") and "Old lead" in brief("old")
         for gone in ("run", "verdict", "finding", "task", "tool", "review", "proposal"):
@@ -146,21 +146,20 @@ def check(directory):
         # B. Priority: the person's partial update marks a thread without touching anything else; an agent's update keeps the mark.
         for project in ("plain", "lean"):
             ev = lambda **k: call("/api/events", {"project": project, "type": "research", **k})
-            ev(id="old", agent="a1", kind="hypothesis", status="open", text="Older lead", next="Fuzz the footer")
-            ev(id="len", agent="a1", kind="hypothesis", status="open", text="Header length is trusted", next="Send a 70000-byte header",
-               evidence=[{"ref": "notes/len.md", "note": "read path"}])
-            ev(id="new", agent="a1", kind="observation", status="open", text="Newest lead")
-            ev(id="dead", agent="a1", kind="hypothesis", status="contradicted", text="Footer overflows", conditions="footer is bounds-checked")
+            ev(id="old", agent="a1", status="open", text="Older lead", next="Fuzz the footer")
+            ev(id="len", agent="a1", status="open", text="Header length is trusted", next="Send a 70000-byte header")
+            ev(id="new", agent="a1", status="open", text="Newest lead")
+            ev(id="dead", agent="a1", status="contradicted", text="Footer overflows", conditions="footer is bounds-checked")
             assert call(f"/api/research?project={project}")[0]["id"] == "dead"
             ev(id="len", priority=True, source="you")
             threads = call(f"/api/research?project={project}")
             top = threads[0]
             assert top["id"] == "len" and top["priority"] is True and all(t["priority"] is False for t in threads[1:])
-            assert (top["text"], top["status"], top["kind"], top["next"], top["evidence"][0]["ref"], top["agent"]) == \
-                ("Header length is trusted", "open", "hypothesis", "Send a 70000-byte header", "notes/len.md", "a1"), top
+            assert (top["text"], top["status"], top["next"], top["agent"], top["bucket"], top["place"]) == \
+                ("Header length is trusted", "open", "Send a 70000-byte header", "a1", "queued", 1) and "kind" not in top, top
             assert top.get("source") != "you" and len(top["history"]) == 2 and top["history"][-1]["priority"] is True
             assert [t["id"] for t in threads[1:]] == ["dead", "new", "old"]  # a mark does not make a thread look recently worked on
-            ev(id="len", agent="a1", kind="hypothesis", status="supported", text="Header length is trusted", priority=False)
+            ev(id="len", agent="a1", status="supported", text="Header length is trusted", priority=False)
             top = call(f"/api/research?project={project}")[0]
             assert top["id"] == "len" and top["priority"] is True and top["status"] == "supported" and top["next"] == "Send a 70000-byte header"
             refused("/api/events", {"project": project, "type": "research", "id": "nope", "priority": True, "source": "you"})
@@ -169,7 +168,7 @@ def check(directory):
             # A focused round is given one frame: the oldest open one. The rest are titles; a claim the person marked says so.
             text = brief(project)
             frame = text.partition("THIS ROUND'S FRAME (round 1 of 3 on it)")[2]
-            assert "- [old] hypothesis / open: Older lead" in frame and "Next test: Fuzz the footer" in frame, text
+            assert "- [old] Older lead" in frame and "Next test: Fuzz the footer" in frame, text
             assert "a Results line that starts with [old], or" in frame and "a Ruled out line that starts with [old]" in frame, frame
             assert "Work as if this frame pays off" not in text  # nothing here can say no, so nothing is assumed
             assert "- [new] Newest lead" in text.partition("ALSO QUEUED")[2].partition("RULED OUT")[0], text
@@ -179,7 +178,7 @@ def check(directory):
             assert plan["frame"] == "old" and plan["brief"] == text
             ev(id="new", priority=True, source="you")  # Pursue: the person's mark goes to the front
             marked = brief(project).partition("THIS ROUND'S FRAME (round 1 of 3 on it; the person marked it)")[2]
-            assert "- [new] observation / open: Newest lead" in marked, brief(project)
+            assert "- [new] Newest lead" in marked, brief(project)
             ev(id="new", priority=False, source="you")
         ev = lambda **k: call("/api/events", {"project": "plain", "type": "research", **k})
         ev(id="len", priority=False, source="you")
@@ -209,24 +208,21 @@ def check(directory):
         assert (off["default_gates"], off["gates"], off["fingerprint"]) == (False, [], "")
         assert "GOAL: none yet" not in lean and "AGENTS.md" not in lean
 
-        # A new project is ready to run at once; a Library page needs a title and a body.
+        # A new project is ready to run at once. Kinds of report that no longer exist are refused.
         made = call("/api/new", {"project": "fresh", "goal": "Bound the constant", "target": "  the lemma in notes.tex "})
-        assert (made["goal"], made["target"], made["sections"]) == ("Bound the constant", "the lemma in notes.tex", [{"id": "now", "title": "Project brief", "view": "note"}]), made
+        assert (made["goal"], made["target"]) == ("Bound the constant", "the lemma in notes.tex") and "sections" not in made, made
         assert "GOAL: Bound the constant" in brief("fresh") and call("/api/project?project=fresh")["hold"] is None
         refused("/api/new", {"project": "fresh", "goal": "again"})
         refused("/api/new", {"project": "bad name", "goal": "x"})
         call("/api/project", {"project": "fresh", "paused": True})
         assert call("/api/project?project=fresh")["hold"] == "paused by the person"
-        page = call("/api/events", {"project": "fresh", "type": "topic", "key": "Why the bound holds", "body": "Because.", "diagram": {"nodes": []}})
-        assert page["key"] == "Why the bound holds" and "diagram" not in page
-        refused("/api/events", {"project": "fresh", "type": "topic", "key": "No body"})
-        made = call("/api/project", {"project": "fresh", "section": {"id": "refs", "title": "References", "view": "board", "statuses": ["a"], "measured": {"a": 1}}})
-        assert made["sections"][-1] == {"id": "refs", "title": "References", "view": "note"}, made
+        for gone in ("topic", "item"):
+            refused("/api/events", {"project": "fresh", "type": gone, "key": "A page", "body": "Because.", "section": "refs"})
 
         # 2. The handoff is the record: the current update, a thread per result, ruled-out approach and lead, a question per decision.
         before = len(call("/api/research?project=lean"))
         def note(project, body, agent="a1"):
-            call("/api/events", {"project": project, "type": "item", "section": "round-notes", "agent": agent, "key": f"Round · {time.time()}", "body": body})
+            call("/api/events", {"project": project, "type": "note", "agent": agent, "key": f"Round · {time.time()}", "body": body})
         note("lean", "Earlier Handoff: a draft.\nMore work.\n\n**Handoff:** Checked the header path. Only you can say whether fuzzing is in scope.\n"
                      "**Results:**\n- Off-by-one in footer length [known: CVE-2020-1]\n1. Parser crashes on empty input [new]\n"
                      "- **Header length is trusted.**\n* parser crashes on empty  input\nRuled out: none\n"
@@ -236,11 +232,10 @@ def check(directory):
         assert len(threads) == before + 2 and len(made) == 2, made
         by = {t["text"]: t for t in made}
         off = by["Off-by-one in footer length"]
-        assert (off["kind"], off["status"], off["conditions"], off["agent"]) == ("observation", "contradicted", "already known: CVE-2020-1", "a1") and "known" not in off
+        assert (off["status"], off["conditions"], off["agent"], off["bucket"]) == ("contradicted", "already known: CVE-2020-1", "a1", "ruled") and "known" not in off
         crash = by["Parser crashes on empty input"]
         assert crash["known"] == "new"
-        now = [e for e in call("/api/events?project=lean")["events"] if e["type"] == "item" and e.get("section") == "now"][-1]
-        assert now["key"] == "Current update" and now["body"].startswith("**Handoff:** Checked") and now["agent"] == "a1"
+        assert all(e["type"] != "item" for e in call("/api/events?project=lean")["events"])  # the note is the record of a round; nothing is copied out of it
         # The decision reaches the person as a question; it is not asked twice, and their answer is given to later rounds as decided.
         asked = [e for e in call("/api/events?project=lean")["events"] if e["type"] == "question"]
         assert [q["text"] for q in asked] == ["Is fuzzing the live service in scope?"] and asked[0]["origin"] == "handoff", asked
@@ -261,20 +256,19 @@ def check(directory):
                      "2) Fuzzing the footer: footer is bounds-checked\nNext: x")
         ruled = [t for t in call("/api/research?project=lean") if t.get("origin") == "handoff" and t["status"] == "contradicted"]
         assert sorted(t["text"] for t in ruled) == ["Brute force over 2^32: too slow on this laptop", "Fuzzing the footer: footer is bounds-checked", "Off-by-one in footer length"], ruled
-        assert all(t["kind"] == "observation" for t in ruled)
         # Leads, in any style: open hypotheses, without repeating a thread that exists
         note("lean", "Handoff: wandered\nResults: none\nLeads:\n- Tokens over 64k wrap: send 65537 bytes\n- Header length is trusted\nLead: the footer\nNext: x")
-        leads = [t for t in call("/api/research?project=lean") if t.get("origin") == "handoff" and t["kind"] == "hypothesis"]
+        leads = [t for t in call("/api/research?project=lean") if t.get("origin") == "handoff" and t["status"] == "open"]
         assert sorted(t["text"] for t in leads) == ["Tokens over 64k wrap: send 65537 bytes", "the footer"] and all(t["status"] == "open" for t in leads), leads
         count = len(call("/api/events?project=lean")["events"])
         note("lean", "No marker here.\nResults:\n- something")
         tail = call("/api/events?project=lean")["events"][count:]  # the note itself, and a line in the log saying nothing was recorded from it
-        assert [e["type"] for e in tail] == ["item", "activity"] and "without a Handoff block" in tail[1]["text"], tail
+        assert [e["type"] for e in tail] == ["note", "activity"] and "without a Handoff block" in tail[1]["text"], tail
         note("plain", "Handoff: done\nResults:\n- a claim")
         assert [t["text"] for t in call("/api/research?project=plain") if t.get("origin")] == ["a claim"]
         lean = brief("lean", "a2")
         assert "- Brute force over 2^32: too slow on this laptop" in lean and "Parser crashes on empty input" in lean
-        assert "WHERE THINGS STAND" in lean and "Handoff: wandered" in lean
+        assert "THE LATEST HANDOFF FROM ANOTHER LOOP (a1)" in lean and "Handoff: wandered" in lean and "LATEST HANDOFF FROM ANOTHER" not in brief("lean", "a1")
         # The person's Drop and Reopen: a status change alone keeps everything else.
         call("/api/events", {"project": "lean", "type": "research", "id": crash["id"], "status": "contradicted", "source": "you"})
         dropped = next(t for t in call("/api/research?project=lean") if t["id"] == crash["id"])
@@ -283,42 +277,21 @@ def check(directory):
         call("/api/events", {"project": "lean", "type": "research", "id": crash["id"], "status": "open", "source": "you"})
         assert next(t for t in call("/api/research?project=lean") if t["id"] == crash["id"])["status"] == "open"
         refused("/api/events", {"project": "lean", "type": "research", "id": crash["id"], "status": "gone", "source": "you"})
-        # Three rounds in a row that record nothing are called out in the next brief.
-        for n in (1, 2, 3):
-            call("/api/events", {"project": "lean", "type": "activity", "agent": "a1", "text": f"Iteration {n} finished (exit 0)"})
-        assert "THE LAST 3 ROUNDS RECORDED NOTHING NEW" in brief("lean")
-
-        # C. A message typed in the terminal reaches the live worker and every later round's brief.
+        # C. One launch per project; the live terminal is read-only, and only for this machine.
         started = call("/api/launch", {"project": "lean", "recipe": "fake"})["started"]
         assert started == ["fake-1"], started
         worker = next(x for x in call("/api/projects") if x["id"] == "lean")["launched"][0]
-        assert worker["interactive"] and worker["alive"]
-        try:  # one loop per project
+        assert worker["alive"] and "interactive" not in worker
+        try:
             call("/api/launch", {"project": "lean", "recipe": "wrap"})
             raise AssertionError("a second loop started on the same project")
         except HTTPError as error:
             assert error.code == 400 and "already running on this project (fake-1)" in json.loads(error.read())["error"]
-        page = {"Origin": base, "X-Hades-Terminal": "1"}
-        said = "Ignore the footer from now on — it is out of scope."
-        message = {"project": "lean", "agent": "fake-1", "session": worker["session"], "text": said}
-        refused("/api/terminal/send", message, 403, {"Origin": "https://other.example", "X-Hades-Terminal": "1"})
-        refused("/api/terminal/send", {**message, "session": "stale"}, 400, page)
-        assert call("/api/terminal/send", message, page) == {"sent": True}
-        call("/api/terminal/send", {**message, "text": "Second note " + "y" * 3000}, page)
+        refused("/api/terminal/send", {"project": "lean", "agent": "fake-1", "session": worker["session"], "text": "x"}, 404)  # nothing is sent to a round after its brief
         assert "text" in call(f"/api/terminal?project=lean&agent=fake-1&session={worker['session']}")
         refused(f"/api/terminal?project=lean&agent=fake-1&session={worker['session']}", None, 403, {"Host": "evil.example"})
-        log = call("/api/events?project=lean")["events"]
-        kept = [e for e in log if e["type"] == "activity" and e.get("source") == "you" and e.get("harness") == "terminal"]
-        assert [e["text"] for e in kept][0] == said and kept[0]["key"] == "fake-1" and len(kept[1]["body"]) > 2000
-        for project, agent in (("lean", "fake-1"), ("lean", "someone-else")):
-            text = brief(project, agent)
-            assert "WHAT THE PERSON SAID IN THE TERMINAL TO EARLIER ROUNDS" in text and said in text
-            assert text.index("CURRENT DIRECTION") < text.index("SAID IN THE TERMINAL") < text.index(said) < text.index("Second note")
-            assert "y" * 601 not in text  # long messages are clipped in the brief
-        call("/api/events", {"project": "plain", "type": "activity", "source": "you", "harness": "terminal", "key": "w", "text": "Use the fixture corpus."})
-        assert "Use the fixture corpus." in brief("plain")
         # The closing note loop.py saves after a round (the live round above stays open for a reply, so post one as it would)
-        call("/api/events", {"project": "lean", "type": "item", "section": "round-notes", "agent": "a1", "key": "Round 1 · a1",
+        call("/api/events", {"project": "lean", "type": "note", "agent": "a1", "key": "Round 1 · a1",
                              "body": "Handoff: tried the parser; the length check holds."})
         text = brief("lean", "a1")
         assert "YOUR CLOSING NOTE FROM YOUR LAST ROUND" in text and "the length check holds" in text
@@ -345,9 +318,9 @@ def check(directory):
         offered = listing["launchers"]
         assert sorted(offered) == ["bare", "fake", "wrap"] and offered["wrap"]["label"] == "Wrapper"
         assert sorted(listing) == ["config", "count", "epoch", "hold", "id", "launched", "launcherError", "launchers"], sorted(listing)
-        assert offered["fake"] == {"label": "fake", "model": "", "models": ["fable", "opus", "sonnet", "haiku"], "interactive": True,
-                                   "command": [str(claude), "-p"], "takes_tools": True, "rounds": 200, "timeout_min": 1, "reply_wait": 120, "keep_background": False, "tools": "recipe", "workers": 1}, offered["fake"]
-        assert offered["wrap"]["model"] == "base-model" and offered["wrap"]["models"] == ["base-model", "other"] and not offered["wrap"]["interactive"]
+        assert offered["fake"] == {"label": "fake", "model": "", "models": ["fable", "opus", "sonnet", "haiku"],
+                                   "command": [str(claude), "-p"], "rounds": 200, "timeout_min": 1, "keep_background": False, "workers": 1, "spend": 0}, offered["fake"]
+        assert offered["wrap"]["model"] == "base-model" and offered["wrap"]["models"] == ["base-model", "other"]
         assert offered["bare"]["models"] == [] and "broken" in listing["launcherError"]
         out = launch(recipe="fake", model="fable")
         assert out["model"] == "fable" and out["started"] == ["fake-1"]
@@ -365,12 +338,12 @@ def check(directory):
 
         # Loop settings: saved once per project, validated, and resolved request > project > recipe > default.
         assert config("lean")["loop"] == {}
-        assert offered["fake"]["rounds"] == 200 and offered["fake"]["timeout_min"] == 1 and offered["fake"]["reply_wait"] == 120
+        assert offered["fake"]["rounds"] == 200 and offered["fake"]["timeout_min"] == 1 and "reply_wait" not in offered["fake"]
         assert offered["bare"]["rounds"] == 4 and offered["bare"]["timeout_min"] == 0 and offered["bare"]["keep_background"] is False
         saved = call("/api/project", {"project": "lean", "loop": {"recipe": "wrap", "model": "other", "rounds": 7, "timeout_min": 0,
-                                                                   "reply_wait": 0, "keep_background": True, "junk": 1, "label": None, "agents": 3, "style": "explore"}})["loop"]
-        assert saved == {"recipe": "wrap", "model": "other", "rounds": 7, "timeout_min": 0, "reply_wait": 0, "keep_background": True}, saved
-        for bad, key in (({"rounds": -1}, "loop.rounds"), ({"tools": "all"}, "loop.tools"), ({"timeout_min": 1441}, "loop.timeout_min"), ({"reply_wait": 1.5}, "loop.reply_wait"),
+                                                                   "reply_wait": 0, "tools": "wide", "spend": 40, "keep_background": True, "junk": 1, "label": None, "agents": 3, "style": "explore"}})["loop"]
+        assert saved == {"recipe": "wrap", "model": "other", "rounds": 7, "timeout_min": 0, "keep_background": True, "spend": 40}, saved  # settings that no longer exist are dropped
+        for bad, key in (({"rounds": -1}, "loop.rounds"), ({"spend": -1}, "loop.spend"), ({"timeout_min": 1441}, "loop.timeout_min"), ({"workers": 9}, "loop.workers"),
                          ({"keep_background": "yes"}, "loop.keep_background"), ({"model": "a b"}, "loop.model"), ("fast", "loop must")):
             try:
                 call("/api/project", {"project": "lean", "loop": bad})
@@ -389,7 +362,7 @@ def check(directory):
         assert call("/api/project?project=blank")["hold"] is None
         # A stand-in loop.py records the arguments each launch would run with
         real = (work / "scripts/loop.py").read_text()
-        (work / "scripts/loop.py").write_text("import json, sys, time\nfrom pathlib import Path\ncan_converse = lambda command: False\n"
+        (work / "scripts/loop.py").write_text("import json, sys, time\nfrom pathlib import Path\n"
                                               "if __name__ == '__main__':\n    Path('argv.json').write_text(json.dumps(sys.argv[1:]))\n    time.sleep(60)\n")
         def argv_of(project, agent):
             for _ in range(100):
@@ -402,14 +375,14 @@ def check(directory):
             return argv[argv.index(name) + 1]
         try:
             out = launch()  # everything from the project's saved settings
-            assert out["recipe"] == "wrap" and out["settings"] == {"rounds": 7, "timeout_min": 0, "reply_wait": 0, "keep_background": True, "tools": "recipe", "workers": 1, "model": "other"}, out
+            assert out["recipe"] == "wrap" and out["settings"] == {"rounds": 7, "timeout_min": 0, "keep_background": True, "workers": 1, "spend": 40, "model": "other"}, out
             argv = argv_of("lean", out["started"][0])
-            assert (flag(argv, "--max-iterations"), flag(argv, "--timeout-min"), flag(argv, "--reply-wait")) == ("7", "0", "0") and "--keep-background" in argv
+            assert (flag(argv, "--max-iterations"), flag(argv, "--timeout-min"), flag(argv, "--max-spend")) == ("7", "0", "40") and "--reply-wait" not in argv and "--interactive" not in argv and "--keep-background" in argv
             assert flag(argv, "-m") == "other" and flag(argv, "--agent") == "wrap-1"
             entry = next(x for x in next(p for p in call("/api/projects") if p["id"] == "lean")["launched"] if x["agent"] == out["started"][0])
             assert entry["settings"] == out["settings"]
             out = launch(recipe="fake", rounds=3, keep_background=False)  # the request wins
-            assert out["settings"] == {"rounds": 3, "timeout_min": 0, "reply_wait": 0, "keep_background": False, "tools": "recipe", "workers": 1, "model": "other"}, out
+            assert out["settings"] == {"rounds": 3, "timeout_min": 0, "keep_background": False, "workers": 1, "spend": 40, "model": "other"}, out
             argv = argv_of("lean", out["started"][0])
             assert flag(argv, "--max-iterations") == "3" and "--keep-background" not in argv and flag(argv, "--model") == "other"
             call("/api/stop", {"project": "lean"})
@@ -424,13 +397,13 @@ def check(directory):
             assert config("lean")["loop"] == {}
             refused("/api/launch", {"project": "lean"})  # three recipes and none chosen
             out = launch(recipe="fake")
-            assert out["settings"] == {"rounds": 200, "timeout_min": 1, "reply_wait": 120, "keep_background": False, "tools": "recipe", "workers": 1, "model": ""}, out
+            assert out["settings"] == {"rounds": 200, "timeout_min": 1, "keep_background": False, "workers": 1, "spend": 0, "model": ""}, out
             assert flag(argv_of("lean", out["started"][0]), "--timeout-min") == "1"
             (work / "launchers.json").write_text(json.dumps({"bare": recipes["bare"]}))  # one recipe: it is used without being named
             out = launch()
             assert out["recipe"] == "bare" and out["settings"]["rounds"] == 4 and out["settings"]["timeout_min"] == 0
             argv = argv_of("lean", out["started"][0])
-            assert flag(argv, "--reply-wait") == "120" and flag(argv, "--timeout-min") == "0"  # research has no time limit by default
+            assert flag(argv, "--max-spend") == "0" and flag(argv, "--timeout-min") == "0"  # research has no time limit by default
             call("/api/project", {"project": "lean", "loop": {"rounds": 0}})  # rounds 0: until stopped
             out = launch()
             assert out["settings"]["rounds"] == 0 and flag(argv_of("lean", out["started"][0]), "--max-iterations") == "0"
@@ -444,7 +417,7 @@ def check(directory):
             assert "THIS ROUND'S FRAME" not in wide and call("/api/brief?project=style&agent=solo&as=json")["frame"] is None
             queued = call("/api/frames", {"project": "style", "frames": [{"text": "the tokenizer on nested brackets", "score": 2, "next": "time a deep input"}]})["added"]
             narrow = brief("style", "solo")
-            assert "This round has one frame to settle" in narrow and "this round is yours" not in narrow and f"- [{queued[0]}] hypothesis / open: the tokenizer" in narrow.partition("THIS ROUND'S FRAME (round 1 of 2 on it)")[2]
+            assert "This round has one frame to settle" in narrow and "this round is yours" not in narrow and f"- [{queued[0]}] the tokenizer" in narrow.partition("THIS ROUND'S FRAME (round 1 of 2 on it)")[2]
             call("/api/project", {"project": "style", "loop": {"recipe": "bare"}})
             out = launch("style")
             assert out["started"] == ["bare-1"] and "style" not in out["settings"], out
@@ -478,7 +451,7 @@ def check_units():
     with tempfile.TemporaryDirectory() as folder:
         server.PROJECTS = Path(folder)
         first = server.starter()
-        assert first["goal"] == "" and first["loop"] == {} and first["sections"] == [{"id": "now", "title": "Project brief", "view": "note"}], first
+        assert first["goal"] == "" and first["loop"] == {} and "sections" not in first, first
         w = server.with_model
         assert w(["claude", "-p"], "opus") == ["claude", "--model", "opus", "-p"]
         assert w(["claude", "-p", "--model", "sonnet"], "opus") == ["claude", "-p", "--model", "opus"]
@@ -507,27 +480,14 @@ def check_units():
         assert server.resolve_program([os.path.join("bin", "claude")]) == [os.path.join("bin", "claude")]
         here = Path(sys.executable).name
         assert os.path.isabs(server.resolve_program([here, "-c"])[0]) if shutil.which(here) else True
-        read, write = os.pipe()  # the thread writer used on Windows: a reader keeps up, then one that never reads
-        stream = os.fdopen(write, "wb")
-        assert server.write_within(stream, b"hello\n", 2) == (b"", None)
-        assert os.read(read, 6) == b"hello\n"
-        left, stuck = server.write_within(stream, b"x" * (4 << 20), 0.3)
-        assert left and stuck is not None and stuck.is_alive()
-        os.close(read)  # the reader goes away: the blocked write fails on its thread instead of hanging
-        stuck.join(5)
-        assert not stuck.is_alive()
-        try:
-            stream.close()
-        except OSError:
-            pass
         # A Results or Ruled out line that names an open thread as [id] settles it in place: no duplicate, and a marked
         # thread leaves the brief's work list once it is ruled out
         with tempfile.TemporaryDirectory() as home:
             kept, server.PROJECTS = server.PROJECTS, Path(home)
             try:
                 (Path(home) / "s").mkdir()
-                (Path(home) / "s" / "project.json").write_text(json.dumps({"goal": "g", "sections": [], "gates": []}))
-                note = lambda body, n: server.ingest({"project": "s", "type": "item", "section": "round-notes", "key": f"Round {n}", "agent": "a", "body": body})
+                (Path(home) / "s" / "project.json").write_text(json.dumps({"goal": "g", "gates": []}))
+                note = lambda body, n: server.ingest({"project": "s", "type": "note", "key": f"Round {n}", "agent": "a", "body": body})
                 note("Handoff: x\nLeads:\n- first lead\n- second lead\nNext: y", 1)
                 lead = {n["text"]: n["id"] for n in server.research("s")}
                 for i in lead.values():
@@ -536,7 +496,7 @@ def check_units():
                 now = {n["id"]: n for n in server.research("s")}
                 assert len(now) == 2, now
                 first, second = now[lead["first lead"]], now[lead["second lead"]]
-                assert (first["kind"], first["status"], first["text"], first["found_in"], first["known"], first["priority"]) == ("conclusion", "supported", "it holds", "first lead", "new", True), first
+                assert (first["status"], first["text"], first["found_in"], first["known"], first["priority"]) == ("supported", "it holds", "first lead", "new", True), first
                 assert (second["status"], second["conditions"], second["text"]) == ("contradicted", "a guard stops it", "second lead"), second
                 listed = [line for line in server.brief("s", "b").partition("CLAIMED (another round's word")[2].partition("RULED OUT")[0].splitlines() if line.startswith("- [")]
                 assert listed == [f"- [{lead['first lead']}] it holds (the person's priority)"], listed
@@ -590,7 +550,7 @@ def check_units():
                                  "- not known: a separate round that sees only your claim and tries to refute it.", "The gates and what they read are not yours to edit"):
                     assert expected in text, (expected, text)
                 assert "Nothing re-checks" not in text
-                note = lambda body, n, **data: server.ingest({"project": "c", "type": "item", "section": "round-notes", "key": f"Round {n}", "agent": "a", "body": body,
+                note = lambda body, n, **data: server.ingest({"project": "c", "type": "note", "key": f"Round {n}", "agent": "a", "body": body,
                                                               **({"data": data} if data else {})})
                 note("Handoff: x\nResults:\n- Lemma one holds [check: one.bin] [new]\n- Lemma two holds [check:  two.bin ]\n- Lemma zero is classical [known: Hardy 1915] [check: zero.bin]\n"
                      "- It looks true for n < 100\nNext: y", 1)
@@ -647,7 +607,7 @@ def check_units():
                 server.ingest({"project": "c", "type": "research", "id": two["id"], "source": "you", "priority": True})
                 text = server.brief("c", "a")
                 frame = text.partition("THIS ROUND'S FRAME (round 1 of 3 on it; the person marked it)")[2]
-                assert f"- [{two['id']}] conclusion / supported: Lemma two holds (the person's priority)" in frame or f"- [{two['id']}] conclusion / supported: Lemma two holds" in frame and "It is a claim that a gate stopped." in frame and "Stopped at reproduces (failed) on two.bin:" in frame, text
+                assert f"- [{two['id']}] Lemma two holds" in frame and "It is a claim that a gate stopped." in frame and "Stopped at reproduces (failed) on two.bin:" in frame, text
                 assert "no fault" in frame and "rule it out; do not reword it" in frame
                 assert f"a Results line that starts with [{two['id']}] and ends with [check: <artifact>], or" in frame
                 assert f"- [{loose['id']}] It looks true for n < 100" in text.partition("CLAIMED, NOT YET THROUGH THE GATES")[2]
@@ -671,7 +631,7 @@ def check_units():
                 back = {n["id"]: n for n in server.research("c")}
                 assert back[one["id"]]["state"] == "established" and back[one["id"]]["audited"] is True and back[two["id"]]["state"] == "failed"
                 # Claimed again by id: every gate runs again on the new artifact, and the audit lapses. Ruled out by id: it leaves the list.
-                server.ingest({"project": "c", "type": "activity", "agent": "a", "text": "Iteration 2 started", "data": {"frame": two["id"]}})  # a round is spent when it starts
+                server.ingest({"project": "c", "type": "activity", "agent": "a", "text": "Round 2 started", "data": {"frame": two["id"]}})  # a round is spent when it starts
                 note(f"Handoff: x\nResults:\n- [{two['id']}]: repaired the induction step [check: two-b.bin]\n- [{one['id']}] is not waiting, so this is a new claim [check: one.bin]\n"
                      "- It looks true for n < 100 [check: small.bin]\nNext: y", 2, frame=two["id"], cwd="/somewhere/the/round/worked")
                 now = {n["id"]: n for n in server.research("c")}
@@ -689,7 +649,7 @@ def check_units():
                 server.add_frames({"project": "c", "frames": ["a fresh place to look"]})  # an open frame with gates behind it is assumed to pay off
                 assert "Settle it one way or the other:" in server.brief("c", "a").partition("THIS ROUND'S FRAME")[2]
                 # A refuter that cites where a claim was already reported stops it for good: it is not queued for repair.
-                fresh = server.ingest({"project": "c", "type": "research", "kind": "conclusion", "status": "supported", "text": "A thing that turns out to be in a 1915 paper", "artifact": "k.bin"})["id"]
+                fresh = server.ingest({"project": "c", "type": "research", "status": "supported", "text": "A thing that turns out to be in a 1915 paper", "artifact": "k.bin"})["id"]
                 for gate in ("reproduces", "default config"):
                     verdict(fresh, gate, "passed", checked="k.bin")
                 verdict(fresh, "not known", "known", checked="k.bin", detail="Verdict: known - Hardy 1915, section 3, states it")
@@ -729,7 +689,7 @@ def check_units():
                 assert "- matters: a separate round that says how much the result matters, from 1 to 5. It is told: How much would a maintainer care?" in server.brief("r", "a")
                 made = {}
                 for text in ("the small one", "the big one"):
-                    made[text] = server.ingest({"project": "r", "type": "research", "kind": "conclusion", "status": "supported", "text": text})["id"]
+                    made[text] = server.ingest({"project": "r", "type": "research", "status": "supported", "text": text})["id"]
                 due = server.gates_pending("r")["pending"]
                 assert [(x["gate"], x["kind"], x["harness"]) for x in due] == [("holds", "refute", ["other-agent", "--read-only", "@{brief_file}"])] * 2, due
                 verdict = lambda i, gate, v="passed", **more: server.ingest({"project": "r", "type": "research", "id": i, "source": "gate", "gate": gate, "verdict": v, **more})
@@ -769,9 +729,9 @@ def check_units():
                 (Path(home) / "r" / "project.json").write_text(json.dumps(cfg))
                 assert {g["name"]: g["fp"] for g in server.public_config("r")["gates"]} == again
                 # Saying an established claim again, about the same artifact, changes nothing; naming another artifact starts it over.
-                server.ingest({"project": "r", "type": "research", "id": made["the big one"], "kind": "conclusion", "status": "supported", "text": "the big one", "artifact": ""})
+                server.ingest({"project": "r", "type": "research", "id": made["the big one"], "status": "supported", "text": "the big one", "artifact": ""})
                 assert next(n for n in server.research("r") if n["id"] == made["the big one"])["state"] == "established"
-                server.ingest({"project": "r", "type": "research", "id": made["the big one"], "kind": "conclusion", "status": "supported", "text": "the big one", "artifact": "b.bin"})
+                server.ingest({"project": "r", "type": "research", "id": made["the big one"], "status": "supported", "text": "the big one", "artifact": "b.bin"})
                 assert next(n for n in server.research("r") if n["id"] == made["the big one"])["state"] == "waiting"
                 # The brief stays a statement of what counts and what is known, not advice on how to work. If this fails because a
                 # line was added, the line needs a failure it prevents that the record shows; otherwise it does not belong.
@@ -792,11 +752,11 @@ def check_units():
                 assert server.plan("p", "w-1", hold=True)[1] == a and server.plan("p", "w-2", hold=True)[1] == b  # handed out, so held even before the round starts
                 assert server.plan("p", "w-1", hold=True)[1] == a and server.plan("p", "someone-reading")[1] == c
                 server.HELD.clear()
-                server.ingest({"project": "p", "type": "activity", "agent": "w-1", "text": "Iteration 1 started", "data": {"frame": a}})
+                server.ingest({"project": "p", "type": "activity", "agent": "w-1", "text": "Round 1 started", "data": {"frame": a}})
                 assert server.plan("p", "w-2")[1] == b and server.plan("p", "w-1")[1] == a
-                server.ingest({"project": "p", "type": "activity", "agent": "w-1", "text": "Iteration 1 finished (exit 0)"})
+                server.ingest({"project": "p", "type": "activity", "agent": "w-1", "text": "Round 1 finished (exit 0)"})
                 assert server.plan("p", "w-2")[1] == a  # the round on it is over and it is still open
-                claim = lambda agent, text: server.ingest({"project": "p", "type": "research", "kind": "conclusion", "status": "supported", "text": text, "agent": agent})["id"]
+                claim = lambda agent, text: server.ingest({"project": "p", "type": "research", "status": "supported", "text": text, "agent": agent})["id"]
                 one, two, gone = claim("w-1", "from the first"), claim("w-2", "from the second"), claim("old-9", "from a loop that is gone")
                 due = lambda agent: sorted(x["id"] for x in server.gates_pending("p", agent)["pending"])
                 assert due("w-1") == sorted([one, gone]) and due("w-2") == [two], (due("w-1"), due("w-2"))
@@ -826,8 +786,8 @@ def check_units():
                 assert server.plan("f", "a")[1] == net and "THIS ROUND'S FRAME (round 1 of 5 on it)" in server.brief("f", "a") and "Next test: send a split header" in server.brief("f", "a")
                 def note(body, n, frame=None):
                     if frame:  # the loop says which frame a round was given as the round starts; that is what spends one of its rounds
-                        server.ingest({"project": "f", "type": "activity", "agent": "a", "text": f"Iteration {n} started", "data": {"frame": frame}})
-                    return server.ingest({"project": "f", "type": "item", "section": "round-notes", "key": f"Round {n}", "agent": "a", "body": body, **({"data": {"frame": frame}} if frame else {})})
+                        server.ingest({"project": "f", "type": "activity", "agent": "a", "text": f"Round {n} started", "data": {"frame": frame}})
+                    return server.ingest({"project": "f", "type": "note", "key": f"Round {n}", "agent": "a", "body": body, **({"data": {"frame": frame}} if frame else {})})
                 # A round that does not settle its frame spends one of its rounds, and its Next line is where the next one starts.
                 note("Handoff: could not build it\nResults: none\nLeads:\n- src/tls.c: renegotiation [score: 4]\n- src/log.c: format strings\nNext: build with the old toolchain", 1, util)
                 now = {n["id"]: n for n in server.research("f")}
@@ -857,27 +817,17 @@ def check_units():
                 (Path(home) / "w" / "project.json").write_text(json.dumps({"goal": "g"}))
                 only = server.add_frames({"project": "w", "frames": [{"text": "the one place", "score": 1}]})["added"][0]
                 assert server.plan("w", "a")[1] == only
-                server.ingest({"project": "w", "type": "activity", "agent": "a", "text": "Iteration 1 started", "data": {"frame": only}})  # it printed nothing, so there is no note; the round is spent all the same
+                server.ingest({"project": "w", "type": "activity", "agent": "a", "text": "Round 1 started", "data": {"frame": only}})  # it printed nothing, so there is no note; the round is spent all the same
                 text, given = server.plan("w", "a")  # its one round is spent: nobody is asked; the next round widens, and is told what was set aside
-                server.ingest({"project": "w", "type": "item", "section": "round-notes", "key": "Round 2", "agent": "a", "body": "Handoff: x\nLeads:\n- a lead a round calls certain [score: 5]\nNext: y"})
+                server.ingest({"project": "w", "type": "note", "key": "Round 2", "agent": "a", "body": "Handoff: x\nLeads:\n- a lead a round calls certain [score: 5]\nNext: y"})
                 sure = next(n for n in server.research("w") if n["text"] == "a lead a round calls certain")
                 assert sure["budget"] == 4  # 5 is the person's to give: a round's own lead tops out at 4
                 server.ingest({"project": "w", "type": "research", "id": sure["id"], "status": "superseded", "source": "you"})
                 assert given is None and "Nothing is queued, so this round is yours" in text and f"- [{only}] the one place" in text.partition("SET ASIDE (their rounds are spent")[2], text
             finally:
                 server.PROJECTS = kept
-        # Tool access is a setting: "wide" adds web and subagents to a Claude recipe's allow-list by name and leaves other programs alone
-        wide = server.with_tools(["claude", "-p", "--allowedTools", "Bash", "Read"])
-        assert wide[:4] == ["claude", "-p", "--allowedTools", "WebSearch"] and wide[-2:] == ["Bash", "Read"] and "Agent" in wide, wide
-        assert server.with_tools(["claude", "-p", "--allowedTools=Bash"]) == ["claude", "-p", "--allowedTools=Bash,WebSearch,WebFetch,Task,Agent"]
-        assert server.with_tools(["claude", "-p"])[-5:] == ["--allowedTools", "WebSearch", "WebFetch", "Task", "Agent"]
-        assert server.with_tools(["codex", "exec", "-"]) == ["codex", "exec", "-"] and server.with_tools(wide) == wide
-        assert server.clean_loop({"tools": "wide"}) == {"tools": "wide"}
-        try:
-            server.clean_loop({"tools": "everything"})
-            raise AssertionError("an unknown tools setting was accepted")
-        except ValueError as error:
-            assert "loop.tools" in str(error)
+        # A launch's spend limit is split between its loops, and each loop stops once its share of model rounds is used.
+        assert server.clean_loop({"spend": 12, "workers": 2}) == {"workers": 2, "spend": 12} and server.clean_loop({"tools": "wide", "reply_wait": 5}) == {}
         asks = server.handoff_items("Handoff: x\nResults: none\n**Decision needed:** Extend past 100?\nDecisions:\n- Use the slow kernel?\nAssumed: stayed under 100\nAssumptions:\n- none\nNext: y")
         assert asks["decision"] == ["Extend past 100?", "Use the slow kernel?", "stayed under 100"] and not asks["results"], asks
         assert len(server.handoff_items("Results:\n" + "\n".join(f"- r{i} " + "z" * 500 for i in range(12)))["results"]) == 8
@@ -887,4 +837,4 @@ if __name__ == "__main__":
     check_units()
     with tempfile.TemporaryDirectory(prefix="Hades research ") as workspace:
         check(workspace)
-    print("Direction, priority, terminal messages, the brief and handoff record, decisions, gates, frames, old logs, launchers and model choice, and a restarted loop passed.")
+    print("Direction, priority, the brief and handoff record, decisions, gates, frames, old logs, launchers and model choice, and a restarted loop passed.")
