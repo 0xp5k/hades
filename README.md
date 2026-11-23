@@ -1,4 +1,4 @@
-<picture><source media="(prefers-color-scheme: dark)" srcset="logo-dark.svg"><img src="logo.svg" width="64" alt="Hades logo"></picture>
+<picture><source media="(prefers-color-scheme: dark)" srcset="logo-dark.png"><img src="logo.png" width="72" alt="Hades logo"></picture>
 
 # Hades
 

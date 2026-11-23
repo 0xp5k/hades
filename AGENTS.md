@@ -68,6 +68,8 @@ When the person wants stronger checking, write the gates for them. There is no A
 ]
 ```
 
+A gate with `"rate"` in place of `"refute"` is a rater: it never stops a claim, it gives an established one a number from 1 to 5 for how much it matters (`rating` on the thread), and results are listed in that order. A refuter or rater can add `"recipe": "<name>"` to run on a different agent from `launchers.json`, which is how to get a second model's check or a refuter with web access.
+
 A command gate is run with the claim's artifact as its last argument, and exit code 0 passes. It runs in the folder the claim's round worked in (a launched loop works in `agent-work/<id>/<recipe>-1/`), so a relative artifact path is found there. A claim that names no artifact cannot be run through a command gate and stays unchecked until a round claims it again with one. Order them cheapest first: it is true, it is the thing asked, it is new, it is usable. `lock` names files in that folder that define the question; when they or the gates change, every earlier verdict stops counting and the gates run again. Test a gate on something that should pass and something that should not before you leave it in place, and show the person what you wrote. Never loosen or remove a gate unless they ask.
 
 A round inside the loop never touches gates, never reports a verdict, and never sets `audited`.

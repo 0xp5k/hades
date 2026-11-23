@@ -126,8 +126,10 @@ DEFAULT_GATES = [{"name": "refutation", "timeout_min": 20, "refute":
 
 
 def gates_of(cfg):
-    """The project's gates, in the order a claim must pass them. A gate is either a command (exit code 0 passes) or a
-    refuter: a separate fresh round that sees only the claim and tries to kill it. A project that sets none gets the
+    """The project's gates, in the order a claim must pass them. A gate is a command (exit code 0 passes), a refuter (a
+    separate fresh round that sees only the claim and tries to kill it), or a rater (a fresh round that says how much the
+    claim matters, 1 to 5; it never stops a claim, it orders what is established). A refuter or rater may name another
+    launch recipe to run on, so the check need not come from the model that made the claim. A project that sets none gets the
     built-in refuter, so that nothing is taken on a round's word and nobody has to set anything up first; "gates": []
     turns gating off. Gates are set only by editing project.json. A command is a list of arguments, or one string split
     the way a POSIX shell would."""
@@ -145,10 +147,12 @@ def gates_of(cfg):
             command = None
         runs = isinstance(command, list) and bool(command) and all(isinstance(x, str) and x for x in command)
         refute = g["refute"].strip()[:2000] if isinstance(g.get("refute"), str) else ""
-        if not runs and not refute:
+        rate = g["rate"].strip()[:2000] if isinstance(g.get("rate"), str) else ""
+        if not runs and not refute and not rate:
             continue
         limit = g.get("timeout_min")
-        out.append({"name": name, **({"command": command} if runs else {"refute": refute}),
+        other = g.get("recipe") if not runs and isinstance(g.get("recipe"), str) and NAME.match(g["recipe"]) else None
+        out.append({"name": name, **({"command": command} if runs else {"refute": refute} if refute else {"rate": rate}), **({"recipe": other} if other else {}),
                     "timeout_min": limit if isinstance(limit, (int, float)) and not isinstance(limit, bool) and 0 < limit <= 1440 else 10})
     return out
 
@@ -240,7 +244,8 @@ def ingest(data):
         if data.get("fp") is not None and data["fp"] != seal:
             raise ValueError("the gates or the locked files changed while this gate ran; it is still due and will run again")
         event = {"type": type, "id": event["id"], "gate": data["gate"], "verdict": data["verdict"], "detail": str(data.get("detail") or "")[-4000:],
-                 "checked": str(data.get("checked") or "")[:300], "fp": seal, "source": "gate"}
+                 "checked": str(data.get("checked") or "")[:300], "fp": seal, "source": "gate",
+                 **({"rating": data["rating"]} if data.get("rating") in (1, 2, 3, 4, 5) and not isinstance(data.get("rating"), bool) else {})}
     elif type == "research" and data.get("source") == "you" and any(k in data for k in ("priority", "status", "score", "audited")) and not any(k in data for k in ("kind", "text")):
         # the person's mark alone (Pursue, Drop, Reopen, a score, their audit): the thread's claim, evidence and history stay as they were
         if not event.get("id") or any(k in data and not isinstance(data[k], bool) for k in ("priority", "audited")) \
@@ -460,7 +465,8 @@ def gates_pending(project):
         out.append({"id": n["id"], "artifact": n.get("artifact") or "", "text": n.get("text", ""), "gate": gate["name"], "timeout_min": gate["timeout_min"],
                     "fp": seal, "cwd": n.get("folder") or "",  # the question it runs under, and the folder its artifact was left in
                     **({"command": [part.replace("{project}", root) for part in gate["command"]]} if "command" in gate else
-                       {"brief": refuter_brief(cfg, n, gate, [x for x in settled if x is not n])})})
+                       {"brief": refuter_brief(cfg, n, gate, [x for x in settled if x is not n]) if "refute" in gate else rater_brief(cfg, n, gate),
+                        "kind": "refute" if "refute" in gate else "rate", **other_harness(gate)})})
     return {"pending": out[:20]}
 
 
@@ -485,6 +491,32 @@ def refuter_brief(cfg, n, gate, settled=()):
         "Verdict: refuted - <the concrete evidence>",
         "Verdict: known - <the earlier source you opened, and what in it matches>",
         "Verdict: stands - <what you tried and where you looked>"]) + "\n"
+
+
+def other_harness(gate):
+    """The command of the recipe a gate asks to run on, or why it cannot: {"harness": [...]}, {"problem": "..."} or {}."""
+    if "recipe" not in gate:
+        return {}
+    recipe = recipes().get(gate["recipe"])
+    return {"harness": resolve_program(recipe["command"])} if recipe else {"problem": f'the gate names the recipe "{gate["recipe"]}", which is not in launchers.json'}
+
+
+def rater_brief(cfg, n, gate):
+    """What a rater round is given: an established claim, and the job of saying how much it matters."""
+    return "\n".join([
+        "You are rating one result from this research. It has already been checked and stands; do not re-check it. Say how much it matters.",
+        *[f"{k.upper()}: {cfg[k]}" for k in ("target", "goal", "rules") if isinstance(cfg.get(k), str) and cfg[k].strip()],
+        "",
+        f'THE RESULT [{n["id"]}]: {n.get("text", "")}',
+        *([n["body"][:1500]] if n.get("body") else []),
+        *([f'Its artifact, in your working folder: {n["artifact"]}'] if n.get("artifact") else []),
+        "",
+        f'YOUR JOB ({gate["name"]}): {gate["rate"]}',
+        "Whoever found a result overrates it, so start from the case against: who would be affected, how often, and what they would do differently for knowing it.",
+        "Rate what was shown, not what it might lead to. 5: it changes what people in the field do or believe. 4: a clear advance that others will use. "
+        "3: a real result worth reporting, of modest consequence. 2: correct and minor. 1: correct and of no practical consequence.",
+        "Do not read loop.log or any notes in this folder, and change nothing here. End with exactly one line:",
+        "Rating: <1 to 5> - <the reason, in a sentence>"]) + "\n"
 
 
 def assess(n, gates, seal):
@@ -524,7 +556,7 @@ def merged(events, type):
 
 THREAD_KEYS = ("ts", "agent", "source", "text", "kind", "status", "area", "scope", "snapshot", "body", "conditions", "next", "evidence", "links", "priority",
                "known", "origin", "artifact", "score", "audited", "gate", "verdict", "detail", "checked", "found_in")
-VERDICT_KEYS = ("verdict", "detail", "checked", "fp", "ts")
+VERDICT_KEYS = ("verdict", "detail", "checked", "fp", "ts", "rating")
 MARK_KEYS = ("priority", "status", "score", "audited", "audit_fp", "audit_artifact")
 STARTED = re.compile(r"Iteration \d+ started")
 
@@ -566,6 +598,8 @@ def research(project, query="", area=""):
         n.update(assess(n, gates, seal))
         n["audited"] = bool(n.get("audited")) and n.get("audit_fp") == seal and n.get("audit_artifact", "") == (n.get("artifact") or "")
         n["attempts"], n["budget"] = attempts.get(n["id"], 0), n["score"] if isinstance(n.get("score"), int) else 3
+        rated = [(n.get("gates") or {}).get(g["name"]) or {} for g in gates if "rate" in g]  # how much an established claim matters, by the rater's word
+        n["rating"] = next((r["rating"] for r in rated if r.get("fp") == seal and (r.get("checked") or "") == (n.get("artifact") or "") and r.get("rating")), None) if n["state"] == "established" else None
         settled = n.get("status") in ("contradicted", "superseded")
         known = n["state"] == "failed" and ((n.get("gates") or {}).get(n["at"]) or {}).get("verdict") == "known"  # nothing a round can repair
         n["frame"] = not settled and (n.get("status") == "open" or (n["state"] == "failed" and not known) or (n["priority"] and n["state"] == "unchecked"))
@@ -1160,7 +1194,8 @@ def plan(project, agent):
                 "- They are run for you after the round, on every Results line. End a line with [check: <artifact>] to name what should be checked"
                 + (f": {hint}" if hint else "") + "." + (" A command gate cannot run without one." if commands else ""),
                 *[f'- {g["name"]}: ' + (shown([part.replace("{project}", root) for part in g["command"]]) + ("" if any("{artifact}" in part for part in g["command"]) else " <artifact>")
-                                        if "command" in g else "a separate round that sees only your claim and tries to refute it. It is told: " + g["refute"][:500]) for g in gates],
+                                        if "command" in g else "a separate round that sees only your claim and tries to refute it. It is told: " + g["refute"][:500] if "refute" in g
+                                        else "a separate round that says how much the result matters, from 1 to 5. It is told: " + g["rate"][:300]) for g in gates],
                 *(["- You may run a gate's command yourself while you work."] if commands else []),
                 "- Whoever checks a result sees its Results line and its artifact, and nothing else from this round. Write the line so it stands on its own, "
                 "and make the artifact self-contained: the input, the exact command that shows the result, and the output to expect.",
@@ -1210,14 +1245,14 @@ def plan(project, agent):
         got = n["gates"][n["at"]]
         said = "\n".join(indent + "  " + row for row in (got.get("detail") or "").strip().splitlines()[-8:])[-700:]
         through = [g["name"] for g in gates[:n["standing"]]]
-        word = "could not run" if n["state"] == "error" else "says it is already known" if got.get("verdict") == "known" else "refuted" if "refute" in by[n["at"]] else "failed"
+        word = "could not run" if n["state"] == "error" else "says it is already known" if got.get("verdict") == "known" else "refuted" if "command" not in by[n["at"]] else "failed"
         return [*([f'{indent}Passed: {", ".join(through)}.'] if through else []),
                 f'{indent}Stopped at {n["at"]} ({word}) on {got.get("checked") or n.get("artifact") or "the claim alone"}' + (":\n" + said if said.strip() else ".")]
 
-    established = sorted((n for n in live if n["state"] == "established"), key=lambda n: -n["audited"])
+    established = sorted((n for n in live if n["state"] == "established"), key=lambda n: (-n["audited"], -(n["rating"] or 0)))
     if established:
         out += ["", f"ESTABLISHED (passed {'every gate' if len(gates) > 1 else 'the gate'}: build on these, do not redo them)",
-                *[f'- [{n["id"]}] {n.get("text", "")[:300]}' + (f' (artifact: {n["artifact"]})' if n.get("artifact") else "") for n in established[:20]]]
+                *[f'- [{n["id"]}] {n.get("text", "")[:300]}' + (f' (artifact: {n["artifact"]})' if n.get("artifact") else "") + (f' (rated {n["rating"]} of 5)' if n["rating"] else "") for n in established[:20]]]
     stopped = sorted((n for n in live if n["state"] in ("failed", "error") and n is not frame), key=lambda n: -n["standing"])
     if stopped:
         out += ["", "CLAIMED, BUT STOPPED AT A GATE" + (" (for context: not this round's work)" if frame else " (to repair one, claim it again starting the Results line with its id; or rule it out)")]
@@ -1282,7 +1317,7 @@ def status(project, base):
               "not running" + (f' ({stopped["text"]}, {ago(stopped.get("ts"))})' if stopped else "")),
            *([doing] if doing else []),
            *(["PROBLEM: " + config_problem(project) + ". The loop holds until it is fixed."] if config_problem(project) else []),
-           "Gates: " + (" -> ".join(g["name"] + (" (refuter)" if "refute" in g else "") for g in gates) + (" [built in; the project set none]" if "gates" not in cfg else "")
+           "Gates: " + (" -> ".join(g["name"] + (" (refuter" if "refute" in g else " (rater" if "rate" in g else "") + (f', on {g["recipe"]}' if g.get("recipe") else "") + (")" if "command" not in g else "") for g in gates) + (" [built in; the project set none]" if "gates" not in cfg else "")
                         if gates else "none: every result is only a claim"),
            f'Spent: {sum(1 for _, e in marks if STARTED.match(e["text"]))} research rounds and '
            f'{sum(1 for e in events if e["type"] == "research" and e.get("source") == "gate" and "refute" in gate_by.get(e.get("gate"), {}))} refuter rounds, for {len(by("established"))} established.',
@@ -1290,8 +1325,9 @@ def status(project, base):
            f'{len([n for n in live if n.get("status") in ("supported", "reproduced") and n["state"] in (None, "unchecked")])} claimed and unchecked, '
            f'{len([n for n in claims if n.get("status") == "contradicted"])} ruled out, {len(line)} queued, {len([n for n in live if n["stalled"]])} set aside']
     if by("established"):
-        out += ["", "ESTABLISHED (through every gate)", *[title(n) + (f' (artifact: {n["artifact"]})' if n.get("artifact") else "") + (" [audited by the person]" if n["audited"] else "")
-                                                         for n in by("established")[:20]]]
+        out += ["", "ESTABLISHED (through every gate; the most important first, by the rater's word where there is one)",
+                *[title(n) + (f' (rated {n["rating"]} of 5)' if n["rating"] else "") + (f' (artifact: {n["artifact"]})' if n.get("artifact") else "") + (" [audited by the person]" if n["audited"] else "")
+                  for n in sorted(by("established"), key=lambda n: (-n["audited"], -(n["rating"] or 0)))[:20]]]
     halted = sorted(by("failed") + by("error"), key=lambda n: -n["standing"])
     if halted:
         out += ["", "STOPPED AT A GATE"]
@@ -1353,7 +1389,15 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(raw)
 
+    def local(self):
+        """True when the request names this server by a local address. A page on another site can be made to resolve
+        here, but it then arrives under that site's name, and is refused."""
+        host = self.headers.get("Host", "")
+        return not host or (re.fullmatch(r"[\w.\-\[\]:]{1,100}", host) is not None and urlparse("http://" + host).hostname in ("127.0.0.1", "::1", "localhost"))
+
     def do_GET(self):
+        if not self.local():
+            return self.reply(403, {"error": "Hades answers only on this machine's own address."})
         url = urlparse(self.path)
         arg = lambda k: (parse_qs(url.query).get(k) or [""])[0]
         try:
@@ -1415,6 +1459,12 @@ class Handler(BaseHTTPRequestHandler):
                 self.headers.get_content_type() == "application/json")
 
     def do_POST(self):
+        # Every write starts or steers an agent that can run commands, so a web page open in the person's browser must not
+        # be able to make one. A browser sends such a page's request with its Origin, and cannot send JSON across sites
+        # without asking first; the loop, curl and this server's own page all pass.
+        origin = self.headers.get("Origin")
+        if not self.local() or (origin is not None and origin != "http://" + self.headers.get("Host", "")) or self.headers.get_content_type() != "application/json":
+            return self.reply(403, {"error": "Send JSON (Content-Type: application/json) from this machine; requests from other sites are refused."})
         try:
             size = int(self.headers.get("Content-Length", 0))
             if size > 200000:

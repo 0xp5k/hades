@@ -704,6 +704,46 @@ def check_units():
                 assert "Lemma two holds (why: the induction step is false at n = 4)" in server.brief("c", "a")
             finally:
                 server.PROJECTS = kept
+        # A rater says how much an established claim matters; it never stops one. A refuter or rater can run on another recipe.
+        with tempfile.TemporaryDirectory() as home:
+            kept, server.PROJECTS, launch_file = server.PROJECTS, Path(home), server.LAUNCH_FILE
+            try:
+                server.LAUNCH_FILE = Path(home) / "launchers.json"
+                server.LAUNCH_FILE.write_text(json.dumps({"reader": {"command": ["other-agent", "--read-only", "@{brief_file}"]}}))
+                (Path(home) / "r").mkdir()
+                (Path(home) / "r" / "project.json").write_text(json.dumps({"goal": "g", "rules": "new results only", "gates": [
+                    {"name": "holds", "refute": "Try to break it.", "recipe": "reader"},
+                    {"name": "known", "refute": "Find it elsewhere.", "recipe": "missing"},
+                    {"name": "matters", "rate": "How much would a maintainer care?", "recipe": "reader", "command": ""}]}))
+                gates = server.public_config("r")["gates"]
+                assert [(g["name"], g.get("recipe"), "rate" in g, "refute" in g) for g in gates] == [("holds", "reader", False, True), ("known", "missing", False, True), ("matters", "reader", True, False)], gates
+                assert "- matters: a separate round that says how much the result matters, from 1 to 5. It is told: How much would a maintainer care?" in server.brief("r", "a")
+                made = {}
+                for text in ("the small one", "the big one"):
+                    made[text] = server.ingest({"project": "r", "type": "research", "kind": "conclusion", "status": "supported", "text": text})["id"]
+                due = server.gates_pending("r")["pending"]
+                assert [(x["gate"], x["kind"], x["harness"]) for x in due] == [("holds", "refute", ["other-agent", "--read-only", "@{brief_file}"])] * 2, due
+                verdict = lambda i, gate, v="passed", **more: server.ingest({"project": "r", "type": "research", "id": i, "source": "gate", "gate": gate, "verdict": v, **more})
+                for i in made.values():
+                    verdict(i, "holds")
+                due = server.gates_pending("r")["pending"]
+                assert all(x["gate"] == "known" and "missing" in x["problem"] and "harness" not in x for x in due), due  # a recipe that is not there is said, not swapped for another
+                for i in made.values():
+                    verdict(i, "known")
+                due = server.gates_pending("r")["pending"]
+                assert [x["kind"] for x in due] == ["rate", "rate"] and "Rating: <1 to 5> - " in due[0]["brief"] and "RULES: new results only" in due[0]["brief"] and "Verdict:" not in due[0]["brief"], due
+                assert all(n["state"] == "waiting" and n["rating"] is None for n in server.research("r"))
+                verdict(made["the small one"], "matters", rating=2, detail="Rating: 2 - minor")
+                verdict(made["the big one"], "matters", rating=5, detail="Rating: 5 - changes practice")
+                verdict(made["the big one"], "holds", rating=9)  # a rating out of range is dropped
+                now = {n["text"]: n for n in server.research("r")}
+                assert (now["the small one"]["state"], now["the small one"]["rating"], now["the big one"]["rating"]) == ("established", 2, 5), now
+                listed = [line for line in server.status("r", "http://x").partition("ESTABLISHED")[2].splitlines() if line.startswith("- [")][:2]
+                assert "the big one (rated 5 of 5)" in listed[0] and "the small one (rated 2 of 5)" in listed[1], listed
+                assert "Gates: holds (refuter, on reader) -> known (refuter, on missing) -> matters (rater, on reader)" in server.status("r", "http://x")
+                assert server.brief("r", "a").partition("ESTABLISHED")[2].index("the big one") < server.brief("r", "a").partition("ESTABLISHED")[2].index("the small one")
+            finally:
+                server.PROJECTS, server.LAUNCH_FILE = kept, launch_file
         # Frames: what the loop works through. A score is the rounds a frame is worth; a round that leaves its frame open spends one.
         with tempfile.TemporaryDirectory() as home:
             kept, server.PROJECTS = server.PROJECTS, Path(home)

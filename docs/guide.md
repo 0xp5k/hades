@@ -87,7 +87,7 @@ them, so a round cannot change them through the server.
       {"name": "not known", "refute": "Look for an earlier report of this exact fault. It is refuted only if you can cite one."}
     ]
 
-A gate is one of two things.
+A gate is one of three things.
 
 - **A command.** It is run once per claim, with the artifact the claim names as its last argument (or wherever you write
   `{artifact}`). It is a list of arguments, or one string split with POSIX shell rules. `{project}` is the project's own
@@ -102,6 +102,18 @@ A gate is one of two things.
   `Verdict: stands - <what it tried>`. Use this where no command can decide: has it been reported before, does it answer
   the question as you meant it. A refuter that finds nothing is weaker evidence than a command that passes, so put
   command gates first.
+
+- **A rater.** Written with `"rate"` in place of `"refute"`. A fresh round is shown a claim that has passed everything
+  before it and says how much it matters, ending `Rating: <1 to 5> - <why>`. A rater never stops a claim. Its number
+  orders what is established, on the page, in the digest and in the brief. Put it last. It is told to argue the result
+  down first, because whoever finds a result overrates it; it is still a model's opinion, and your audit outranks it.
+
+A refuter or a rater may add `"recipe": "<name from launchers.json>"` to run on a different agent from the one doing the
+research. Two reasons to: a check from another model does not share the first one's blind spots, and a refuter that has
+to look something up needs tools the research agent may not have, such as web access.
+
+    {"name": "not known", "recipe": "claude-reader", "refute": "Find an earlier report of this result. Cite what you opened."},
+    {"name": "matters", "recipe": "claude-reader", "rate": "How much would a maintainer of this code care, and why?"}
 
 How a claim moves:
 

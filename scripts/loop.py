@@ -660,6 +660,7 @@ def run_conversation(args, brief, timeout, env, inbox, reply_wait=120, keep=Fals
 
 
 REFUTERS_PER_ROUND = 4
+RATING = re.compile(r"^\s*(?:[-*]\s+)?\**\s*rating\s*\**\s*:\s*\**\s*([1-5])\b", re.I | re.M)
 VERDICT = re.compile(r"^\s*(?:[-*]\s+)?\**\s*verdict\s*\**\s*:\s*\**\s*(refuted|known|stands)\b(?!\s*\**\s*[-:]?\s*<)", re.I | re.M)
 
 
@@ -686,7 +687,7 @@ def run_gates(a, query, command):
                 if refuters >= REFUTERS_PER_ROUND or silent >= 2:
                     continue
                 refuters += 1
-            artifact, limit = str(item.get("artifact") or ""), float(item.get("timeout_min") or 10) * 60
+            artifact, limit, rating = str(item.get("artifact") or ""), float(item.get("timeout_min") or 10) * 60, None
             # A gate runs in the folder the claim's round worked in, where its artifact was left, whichever loop runs it.
             where = item.get("cwd") if isinstance(item.get("cwd"), str) and os.path.isdir(item["cwd"]) else None
             print(f"\n[loop] Gate {item.get('gate')} for [{item.get('id')}]" + (f" on {artifact}" if artifact else ""), flush=True)
@@ -701,14 +702,22 @@ def run_gates(a, query, command):
                     verdict = "passed" if code == 0 else "failed" if isinstance(code, int) else "error"
                 else:  # a refuter: the harness itself, fresh, with a brief that holds only the claim
                     brief = str(item.get("brief") or "")
+                    if item.get("problem"):
+                        raise ValueError(str(item["problem"]))
+                    harness = resolve(item["harness"]) if isinstance(item.get("harness"), list) and item["harness"] else command  # the gate may run on another agent
                     with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".txt", prefix="refute-", delete=False) as f:
                         f.write(brief)
                     try:
-                        code, output = run_harness([part.replace("{brief_file}", f.name).replace("{brief}", brief) for part in command], brief, limit, cwd=where)
+                        code, output = run_harness([part.replace("{brief_file}", f.name).replace("{brief}", brief) for part in harness], brief, limit, cwd=where)
                     finally:
                         os.unlink(f.name)
-                    said = VERDICT.findall(output)
-                    verdict = "error" if code != 0 or not said else {"refuted": "failed", "known": "known"}.get(said[-1].lower(), "passed")
+                    if item.get("kind") == "rate":  # a rater never stops a claim: it says how much an established one matters
+                        said = RATING.findall(output)
+                        rating = int(said[-1]) if said else None
+                        verdict = "error" if code != 0 or not said else "passed"
+                    else:
+                        said = VERDICT.findall(output)
+                        verdict = "error" if code != 0 or not said else {"refuted": "failed", "known": "known"}.get(said[-1].lower(), "passed")
                     silent = silent + 1 if verdict == "error" else 0
                 detail = output.strip() if isinstance(code, int) else f"{output.strip()}\n{code}".strip()
             except (OSError, ValueError) as e:
@@ -716,7 +725,7 @@ def run_gates(a, query, command):
             print(f"[loop] Gate {item.get('gate')} {verdict} for [{item.get('id')}]", flush=True)
             try:
                 call("/api/events", {"project": a.project, "type": "research", "id": item.get("id"), "source": "gate", "gate": item.get("gate"),
-                                     "verdict": verdict, "detail": detail[-4000:], "checked": artifact, "fp": item.get("fp")})
+                                     "verdict": verdict, "detail": detail[-4000:], "checked": artifact, "fp": item.get("fp"), **({"rating": rating} if rating else {})})
             except OSError:
                 pass  # it stays due (the server was away, or the gates changed while this one ran), and runs again after the next round
 

@@ -72,6 +72,7 @@ sys.exit(0 if sys.stdin.read() == "" else 3)
     said = lambda text: [v.lower() for v in loop.VERDICT.findall(text)]
     assert said("thinking\n**Verdict:** refuted - issue 12\n") == ["refuted"] and said("- Verdict: stands - ran it twice") == ["stands"]
     assert said("Verdict: refuted - <the concrete evidence>\nVerdict: stands - <what you tried and where you looked>\nI could not decide.") == []
+    assert loop.RATING.findall("It is small.\n**Rating:** 2 - minor\nRating: 4 - on reflection") == ["2", "4"] and loop.RATING.findall("Rating: <1 to 5> - <the reason>") == []
     assert loop.can_converse(["claude", "-p", "--model", "sonnet"])
     assert not loop.can_converse(["claude", "-p", "--output-format", "json"])
     assert not loop.can_converse(["claude", "-p", "{brief}"]) and not loop.can_converse(["codex", "exec", "-"])
@@ -321,7 +322,7 @@ def check(directory):
 
     def get(route, data=None):
         body = json.dumps(data).encode() if data is not None else None
-        with urlopen(base + route, body, timeout=3) as response:
+        with urlopen(Request(base + route, body, {"Content-Type": "application/json"}), timeout=3) as response:
             return json.load(response)
 
     message = "Review complete — résumé 日本語"
@@ -345,6 +346,19 @@ def check(directory):
             with urlopen(base + "/AGENTS.md", timeout=3) as guide:
                 assert b"topic" in guide.read()
             hello = json.dumps({"project": "workspace", "agent": "fixture", "session": "sample", "text": "Hello"}).encode()
+            # A page on another site cannot write here: not with its Origin, not as a plain form post, not under another name.
+            for headers in ({"Origin": "https://other.example", "Content-Type": "application/json"}, {"Content-Type": "text/plain"}, {"Content-Type": "application/json", "Host": "evil.example"}):
+                try:
+                    urlopen(Request(base + "/api/project", json.dumps({"project": "workspace", "direction": "do something else"}).encode(), headers), timeout=3)
+                    raise AssertionError(f"a write was accepted with {headers}")
+                except HTTPError as error:
+                    assert error.code == 403, (headers, error.code)
+            try:
+                urlopen(Request(base + "/api/projects", headers={"Host": "evil.example"}), timeout=3)
+                raise AssertionError("a read was answered under another site's name")
+            except HTTPError as error:
+                assert error.code == 403
+            assert get("/api/project?project=workspace")["direction"] == ""
             for origin, code in (("https://other.example", 403), (base, 400)):  # another site is refused; no such worker here
                 request = Request(base + "/api/terminal/send", hello, {"Origin": origin, "X-Hades-Terminal": "1",
                                   "Content-Type": "application/json"})
