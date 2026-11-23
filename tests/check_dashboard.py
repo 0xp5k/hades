@@ -235,7 +235,7 @@ done("Handoff: " + brief, num_turns=2, total_cost_usd=0.25, usage={"input_tokens
             Path(folder, "claude.cmd").write_text(f'@"{sys.executable}" "{Path(folder, "echo.py")}" %*\r\n')
             with patch.dict(os.environ, {"PATH": folder + os.pathsep + os.environ["PATH"]}):
                 command = loop.resolve(["claude", "-p"])
-            assert command[0].lower().endswith("claude.cmd") and loop.can_converse(command), command
+            assert command[0].lower().endswith("claude.cmd") and loop.streams(command), command
             with patch.object(loop.sys, "stdout", io.TextIOWrapper(io.BytesIO(), newline="\n")):
                 code, output = loop.run_harness(command, "the brief", 30)
             assert code == 0 and output.strip() == "Handoff: the brief", (code, output)
