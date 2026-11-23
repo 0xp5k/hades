@@ -317,7 +317,7 @@ def check(directory):
         listing = next(x for x in call("/api/projects") if x["id"] == "lean")
         offered = listing["launchers"]
         assert sorted(offered) == ["bare", "fake", "wrap"] and offered["wrap"]["label"] == "Wrapper"
-        assert sorted(listing) == ["config", "count", "epoch", "hold", "id", "launched", "launcherError", "launchers"], sorted(listing)
+        assert sorted(listing) == ["config", "count", "epoch", "hold", "id", "launched", "launcherError", "launchers", "spent"], sorted(listing)
         assert offered["fake"] == {"label": "fake", "model": "", "models": ["fable", "opus", "sonnet", "haiku"],
                                    "command": [str(claude), "-p"], "rounds": 200, "timeout_min": 1, "keep_background": False, "workers": 1, "spend": 0}, offered["fake"]
         assert offered["wrap"]["model"] == "base-model" and offered["wrap"]["models"] == ["base-model", "other"]

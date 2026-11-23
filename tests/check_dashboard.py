@@ -1,6 +1,7 @@
 """Exercise the public dashboard command in an empty workspace, without a model."""
 import json
 import os
+import re
 from pathlib import Path
 import shutil
 import signal
@@ -8,7 +9,6 @@ import socket
 import subprocess
 import sys
 import tempfile
-import threading
 import time
 from unittest.mock import patch
 from urllib.error import HTTPError
@@ -17,6 +17,7 @@ from urllib.request import Request, urlopen
 ROOT = Path(__file__).resolve().parents[1]
 ALIVE = """
 import os
+import re
 def alive(pid):  # os.kill(pid, 0) would end the process on Windows
     if os.name != "nt":
         try:
@@ -43,9 +44,9 @@ def alive(pid):  # os.kill(pid, 0) would end the process on Windows
 
 
 def check_live_round():
-    # A stand-in for `claude -p` in stream-json mode: one tool call, then it waits for the person's message.
+    # A stand-in for `claude -p` in stream-json mode: it reads the brief, makes one tool call and gives its result.
     sys.path.insert(0, str(ROOT))
-    import argparse, io, queue
+    import argparse, io
     from scripts import loop
     head = """
 import json, sys
@@ -54,96 +55,53 @@ text = lambda value: say({"type": "stream_event", "event": {"type": "content_blo
 done = lambda value, **more: say({"type": "result", "subtype": "success", "result": value, **more})
 """
     child = head + """
-brief = json.loads(sys.stdin.readline())["message"]["content"]
+brief = sys.stdin.read()
 say({"type": "system", "subtype": "init", "model": "fixture"})
 sys.stdout.buffer.write(b"plain warning \\xff from the CLI\\n" + json.dumps({"type": "stream_event", "event": {"type": "content_block_delta",
     "delta": {"type": "text_delta", "text": "Working on: " + brief}}}).encode()[:-4] + b"\\xfe\\"}}}\\n")
 say({"type": "assistant", "message": {"content": [{"type": "text", "text": "Working on: " + brief}]}})
 say({"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "t1", "name": "Bash", "input": {"command": "echo hi"}}]}})
-steer = json.loads(sys.stdin.readline())["message"]["content"]
 say({"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "t1", "content": "hi"}]}})
-text("Heard: " + steer)
-done("Handoff: " + steer, num_turns=2, total_cost_usd=0.25, usage={"input_tokens": 10, "cache_read_input_tokens": 90, "output_tokens": 7})
-reply = json.loads(sys.stdin.readline())["message"]["content"]
-done("Second turn: " + reply, num_turns=3, total_cost_usd=0.5, usage={"input_tokens": 5, "output_tokens": 3})
-sys.exit(0 if sys.stdin.read() == "" else 3)
+text("Checked the résumé parser")
+done("Handoff: " + brief, num_turns=2, total_cost_usd=0.25, usage={"input_tokens": 10, "cache_read_input_tokens": 90, "output_tokens": 7})
 """
     # A refuter's verdict is the last one it gave; the brief's own template lines, echoed back, are not a verdict.
     said = lambda text: [v.lower() for v in loop.VERDICT.findall(text)]
     assert said("thinking\n**Verdict:** refuted - issue 12\n") == ["refuted"] and said("- Verdict: stands - ran it twice") == ["stands"]
     assert said("Verdict: refuted - <the concrete evidence>\nVerdict: stands - <what you tried and where you looked>\nI could not decide.") == []
     assert loop.RATING.findall("It is small.\n**Rating:** 2 - minor\nRating: 4 - on reflection") == ["2", "4"] and loop.RATING.findall("Rating: <1 to 5> - <the reason>") == []
-    assert loop.can_converse(["claude", "-p", "--model", "sonnet"])
-    assert not loop.can_converse(["claude", "-p", "--output-format", "json"])
-    assert not loop.can_converse(["claude", "-p", "{brief}"]) and not loop.can_converse(["codex", "exec", "-"])
+    # Only a direct `claude -p` that reads its prompt on standard input is shown as it works.
+    assert loop.streams(["claude", "-p", "--model", "sonnet"])
+    assert not loop.streams(["claude", "-p", "--output-format", "json"])
+    assert not loop.streams(["claude", "-p", "{brief}"]) and not loop.streams(["codex", "exec", "-"])
 
-    def converse(source, timeout=30, messages=(), reply_wait=5):
-        inbox = queue.Queue()
-        inbox.live = False
-        for m in messages:
-            inbox.put(m)
+    def stream(source, timeout=30, brief="the brief"):
         screen = io.TextIOWrapper(io.BytesIO(), newline="\n", encoding="utf-8", write_through=True)
-        with patch.object(loop, "call", lambda path, body=None: None), patch.object(loop, "EXIT_WAIT", 1), \
-                patch.object(loop.sys, "stdout", screen):
-            result = loop.run_conversation([sys.executable, "-u", "-c", source], "the brief", timeout, None, inbox, reply_wait)
-        return (*result, screen.buffer.getvalue().decode("utf-8"), inbox)
+        with patch.object(loop, "call", lambda path, body=None: None), patch.object(loop.sys, "stdout", screen):
+            result = loop.run_stream([sys.executable, "-u", "-c", source], brief, timeout, None)
+        return (*result, screen.buffer.getvalue().decode("utf-8"))
 
-    sent, line = [], loop.Screen.line
-
-    def reply(self, text):  # the person answers once invited to, after the first turn has finished
-        line(self, text)
-        if "Reply within" in text and not sent:
-            sent.append(text)
-            threading.Timer(0.4, inbox.put, ["And then?"]).start()
-    inbox = queue.Queue()
-    inbox.live = False
-    inbox.put("Check the résumé parser")
-    screen = io.TextIOWrapper(io.BytesIO(), newline="\n", encoding="utf-8", write_through=True)
-    with patch.object(loop.Screen, "line", reply), patch.object(loop.sys, "stdout", screen):
-        code, output, stats = loop.run_conversation([sys.executable, "-u", "-c", child], "the brief", 30, None, inbox, 5)
-    shown = screen.buffer.getvalue().decode("utf-8")
-    assert code == 0 and output == "Handoff: Check the résumé parser\n\nSecond turn: And then?", (code, output)
-    for expected in ("[claude] Session started · fixture", "plain warning � from the CLI", "Working on: the brief�", "> Bash  echo hi",
-                     "  | hi", "You: Check the résumé parser", "Heard: Check the résumé parser", "Reply within 5 s", "You: And then?"):
+    # The brief goes in as plain text; the transcript shows the session, the CLI's own lines, the text once, and the tool call.
+    code, output, stats, shown = stream(child, brief="the résumé brief")
+    assert code == 0 and output == "Handoff: the résumé brief", (code, output)
+    for expected in ("[claude] Session started · fixture", "plain warning \ufffd from the CLI", "Working on: the résumé brief\ufffd", "> Bash  echo hi",
+                     "  | hi", "Checked the résumé parser"):
         assert expected in shown, (expected, shown)
-    assert shown.count("Working on: the brief") == 1 and len(sent) == 1 and inbox.empty()
-    # Cost and turns are cumulative for the session; token usage is per turn.
-    assert stats == {"tools": 1, "messages": 2, "turns": 3, "cost_usd": 0.5, "input_tokens": 105, "output_tokens": 10}, stats
+    assert shown.count("Working on: the résumé brief") == 1, shown
+    assert stats == {"tools": 1, "turns": 2, "cost_usd": 0.25, "input_tokens": 100, "output_tokens": 7}, stats
 
-    # The time limit passing while a finished turn waits for a reply ends the round cleanly, not as a timeout.
-    waits = head + """
-json.loads(sys.stdin.readline()); json.loads(sys.stdin.readline())
-done("Handoff: answered")
-sys.exit(0 if sys.stdin.read() == "" else 3)
-"""
-    code, output, stats, shown, _ = converse(waits, timeout=1.5, messages=["Hello"])
-    assert code == 0 and output == "Handoff: answered" and stats["messages"] == 1 and "turns" not in stats, (code, shown)
-    # An error result, a session that ends without any result, and one that ignores the end of its input all count as failures.
-    code, output, stats, shown, _ = converse(head + 'sys.stdin.readline(); done("API Error: overloaded", is_error=True)')
+    # An error result and a session that ends without any result both count as failures; the time limit ends a round.
+    code, output, stats, shown = stream(head + 'sys.stdin.read(); done("API Error: overloaded", is_error=True)')
     assert code == 1 and output == "API Error: overloaded" and "API Error: overloaded" in shown, (code, shown)
-    code, output, stats, shown, _ = converse(head + 'sys.stdin.readline(); print("Not signed in", flush=True)')
-    assert code == "exited without a result" and output.strip() == "Not signed in" and stats == {"tools": 0, "messages": 0}, code
-    code, *_ = converse(head + 'import time; sys.stdin.readline(); done("Handoff: x"); sys.stdin.read(); time.sleep(30)')
-    assert code == "did not exit after its session ended", code
-    code, *_ = converse(head + 'import time; sys.stdin.readline(); time.sleep(30)', timeout=1)
+    code, output, stats, shown = stream(head + 'sys.stdin.read(); print("Not signed in", flush=True)')
+    assert code == "exited without a result" and output.strip() == "Not signed in" and stats == {"tools": 0}, (code, stats)
+    code, *_ = stream(head + 'import time; sys.stdin.read(); time.sleep(30)', timeout=1)
     assert code == "timeout after 0.0166667 min", code
-
-    # The listener keeps a final line typed without a newline, and reads JSON lines from the dashboard.
-    heard = subprocess.run([sys.executable, "-c", "import queue, sys, json; sys.path.insert(0, sys.argv[1]); from scripts import loop\n"
-                            "q = queue.Queue(); q.live = True; loop.listen(q); print(json.dumps(list(q.queue)))", str(ROOT)],
-                           input='{"text": "two\\nlines"}\nplain\r\nlast'.encode(), stdout=subprocess.PIPE, check=True)
-    assert json.loads(heard.stdout) == ["two\nlines", "plain", "last"], heard.stdout
-
-    # A reply wait of 0 ends the round as soon as Claude finishes, even after the person spoke, and says nothing about replying.
-    clock = time.time()
-    code, output, stats, shown, _ = converse(waits, messages=["Hello"], reply_wait=0)
-    assert code == 0 and stats["messages"] == 1 and "Reply within" not in shown and time.time() - clock < 4, (code, shown)
     # A time limit of 0 means none: a round outlasts what a short limit would have allowed.
     slow = "import time; time.sleep(1.5); print('Handoff: slow')"
     with patch.object(loop.sys, "stdout", io.TextIOWrapper(io.BytesIO(), newline="\n")):
         assert loop.run_harness([sys.executable, "-c", slow], "b", 0) == (0, "Handoff: slow\n")
-    code, output, *_ = converse(head + 'import time; sys.stdin.readline(); time.sleep(1.5); done("Handoff: slow"); '
-                                'sys.exit(0 if sys.stdin.read() == "" else 3)', timeout=0)
+    code, output, *_ = stream(head + 'import time; sys.stdin.read(); time.sleep(1.5); done("Handoff: slow")', timeout=0)
     assert (code, output) == (0, "Handoff: slow"), code
 
     # Ending what a round started, on every platform: POSIX tracks the harness's descendants, Windows puts them in a job.
@@ -182,7 +140,7 @@ sys.exit(0 if sys.stdin.read() == "" else 3)
                 assert loop.run_harness([sys.executable, "-c", holder + "time.sleep(60)"], "b", 1)[0] == "timeout after 0.0166667 min"
                 assert gone(taken()[0]) and time.time() - clock < 15, time.time() - clock
             clock = time.time()
-            code, *_ = converse(head + holder + 'sys.stdin.readline(); time.sleep(60)', timeout=1)
+            code, *_ = stream(head + holder + 'sys.stdin.read(); time.sleep(60)', timeout=1)
             assert code == "timeout after 0.0166667 min" and time.time() - clock < 10 and gone(taken()[0]), code
 
             # --keep-background: what a round started keeps running between rounds, even while holding the output open
@@ -306,9 +264,9 @@ sys.exit(0 if sys.stdin.read() == "" else 3)
             for name, handler in signals.items():
                 signal.signal(getattr(signal, name), handler)
     texts = [e.get("text") for e in events if e and e.get("type") == "activity"]
-    assert texts == ["Iteration 1 started", "Iteration 1 finished (exit 0)", "Iteration 2 started", "Iteration 2 finished (exit 0)",
-                     "Loop stopped: reached 2 iterations"], texts
-    finished = [e for e in events if e and e.get("text") == "Iteration 1 finished (exit 0)"]
+    assert texts == ["Round 1 started", "Round 1 finished (exit 0)", "Round 2 started", "Round 2 finished (exit 0)",
+                     "Loop stopped: reached 2 rounds"], texts
+    finished = [e for e in events if e and e.get("text") == "Round 1 finished (exit 0)"]
     assert len(finished) == 1 and set(finished[0]["data"]["stats"]) == {"seconds"} and finished[0]["data"]["loop_session"], finished
 
 
@@ -342,10 +300,17 @@ def check(directory):
                 raise RuntimeError("Dashboard did not become ready")
             assert [p["id"] for p in projects] == ["workspace"]
             with urlopen(base + "/", timeout=3) as page:
-                assert b'id="view"' in page.read()
+                html = page.read().decode()
+            # The page is a viewer: it reads these, and writes only a launch, a stop, the loop settings and the audited mark.
+            assert 'id="view"' in html
+            for read in ("/api/projects", "/api/events?project=", "/api/research?project=", "/api/terminal?", "/api/run-details?"):
+                assert read in html, read
+            wrote = set(re.findall(r'"(/api/[a-z/-]+)"', html)) - {"/api/projects"}
+            assert wrote == {"/api/launch", "/api/stop", "/api/project", "/api/events"}, wrote
+            for gone in ("/api/terminal/send", "/api/frames", "/api/new", "reply_wait", "priority:", "direction:", "paused:", "answer:", "Iteration "):
+                assert gone not in html, gone
             with urlopen(base + "/AGENTS.md", timeout=3) as guide:
-                assert b"topic" in guide.read()
-            hello = json.dumps({"project": "workspace", "agent": "fixture", "session": "sample", "text": "Hello"}).encode()
+                assert b"/api/status" in guide.read()
             # A page on another site cannot write here: not with its Origin, not as a plain form post, not under another name.
             for headers in ({"Origin": "https://other.example", "Content-Type": "application/json"}, {"Content-Type": "text/plain"}, {"Content-Type": "application/json", "Host": "evil.example"}):
                 try:
@@ -359,14 +324,11 @@ def check(directory):
             except HTTPError as error:
                 assert error.code == 403
             assert get("/api/project?project=workspace")["direction"] == ""
-            for origin, code in (("https://other.example", 403), (base, 400)):  # another site is refused; no such worker here
-                request = Request(base + "/api/terminal/send", hello, {"Origin": origin, "X-Hades-Terminal": "1",
-                                  "Content-Type": "application/json"})
-                try:
-                    urlopen(request, timeout=3)
-                    raise AssertionError("A terminal message without a live worker succeeded")
-                except HTTPError as error:
-                    assert error.code == code, (origin, error.code)
+            try:  # the terminal is one-way: nothing can be sent to a round
+                get("/api/terminal/send", {"project": "workspace", "agent": "fixture", "session": "sample", "text": "Hello"})
+                raise AssertionError("a message to a round was accepted")
+            except HTTPError as error:
+                assert error.code == 404, error.code
             route = "/api/run-details?project=workspace&agent=fixture&session=sample&round="
             prompt = "\nReview Ω\r\n$HOME 'literal' <tag>\n"
             if first:
@@ -380,12 +342,45 @@ def check(directory):
                 assert get(route + "1")[0]["argv"] == command
                 assert get(route + "2") == []
                 count = get("/api/projects")[0]["count"]
-                get("/api/events", {"project": "workspace", "type": "item", "section": "now",
-                                    "key": "Current update", "body": message})
+                # What the page draws comes from the server: a queued frame, then a claim, each with its group and its place.
+                frame = get("/api/frames", {"project": "workspace", "frames": ["Look at the résumé parser"]})["added"][0]
+                claim = get("/api/events", {"project": "workspace", "type": "research", "status": "supported", "agent": "fixture",
+                                            "text": "The parser drops the last line"})["id"]
+                threads = {n["id"]: n for n in get("/api/research?project=workspace")}
+                assert {"bucket", "place", "working", "state", "at", "standing", "attempts", "budget", "audited", "history"} <= set(threads[frame]), sorted(threads[frame])
+                assert (threads[frame]["bucket"], threads[frame]["place"], threads[frame]["working"]) == ("queued", 1, None), threads[frame]
+                assert threads[claim]["bucket"] == "waiting" and threads[claim]["at"] and threads[claim]["place"] is None, threads[claim]
+                # The audited mark, the page's one write to the record: set, then removed.
+                for on in (True, False):
+                    get("/api/events", {"project": "workspace", "type": "research", "id": claim, "audited": on, "source": "you"})
+                    assert next(n for n in get("/api/research?project=workspace") if n["id"] == claim)["audited"] is on
+                # The settings dialog sends only these keys; the server keeps them, and refuses one it does not know.
+                loop = {"rounds": 3, "timeout_min": 20, "workers": 2, "spend": 12, "keep_background": True, "model": "sonnet"}
+                get("/api/project", {"project": "workspace", "loop": loop})
+                assert get("/api/projects")[0]["config"]["loop"] == loop
+                for bad in ({"spend": 10001}, {"workers": 5}, {"rounds": "many"}):
+                    try:
+                        get("/api/project", {"project": "workspace", "loop": bad})
+                        raise AssertionError(f"loop settings {bad} were accepted")
+                    except HTTPError as error:
+                        assert error.code == 400, (bad, error.code)
+                for old in ({"reply_wait": 5}, {"tools": "wide"}):  # settings that no longer exist are never kept
+                    try:
+                        get("/api/project", {"project": "workspace", "loop": {**loop, **old}})
+                    except HTTPError as error:
+                        assert error.code == 400, (old, error.code)
+                    assert get("/api/projects")[0]["config"]["loop"] == loop, old
+                get("/api/project", {"project": "workspace", "loop": {}})
+                # A round's note is what the Live page and the Overview's latest handoff read.
+                count = get("/api/projects")[0]["count"]
+                get("/api/events", {"project": "workspace", "type": "note", "agent": "fixture", "key": "Round 1 · fixture · now",
+                                    "body": "Handoff: " + message, "data": {"loop_session": "sample"}})
                 assert get("/api/projects")[0]["count"] == count + 1
-                assert get(f"/api/events?project=workspace&after={count}")["events"][0]["body"] == message
+                assert get(f"/api/events?project=workspace&after={count}")["events"][0]["body"] == "Handoff: " + message
             else:
-                assert get("/api/events?project=workspace")["events"][-1]["body"] == message
+                notes = [e for e in get("/api/events?project=workspace")["events"] if e["type"] == "note"]
+                assert notes[-1]["body"] == "Handoff: " + message and notes[-1]["data"]["loop_session"] == "sample"
+                assert get("/api/projects")[0]["config"]["loop"] == {}
             assert get(route + "1")[0]["stdin"] == prompt
         finally:
             proc.terminate()

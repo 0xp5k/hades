@@ -617,6 +617,8 @@ def research(project, query="", area=""):
     on = rounds_on(project)
     for n in out:
         n["place"], n["working"] = order.get(n["id"]), on.get(n["id"])
+        if n["working"] and n["bucket"] == "aside":  # its last round is running: it is being worked, not set aside
+            n["bucket"] = "queued"
     if area:
         out = [n for n in out if n.get("area") == area]
     if query:
@@ -1183,6 +1185,22 @@ def plan(project, agent, hold=False):
     return "\n".join(out) + "\n", frame["id"] if frame else None
 
 
+def spent(project):
+    """What the project has cost, in the one unit Hades counts: model rounds. A research round is one; so is each run
+    of a refuter or a rater. "launch" is what the loops running now have used, against the launch's limit if it has one."""
+    events, gates = load(project), {g["name"]: g for g in gates_of(config(project))}
+    runs = [r for r in launched(project) if r["alive"]]
+    since = min((r["started"] for r in runs), default=None)
+    rounds = [e for e in events if e["type"] == "activity" and STARTED.match(e.get("text") or "")]
+    checks = [e for e in events if e["type"] == "research" and e.get("source") == "gate" and "command" not in gates.get(e.get("gate"), {"command": 1})]
+    seconds = sum(e["data"]["stats"]["seconds"] for e in events if e["type"] == "activity" and isinstance(e.get("data"), dict)
+                  and isinstance(e["data"].get("stats"), dict) and isinstance(e["data"]["stats"].get("seconds"), (int, float)))
+    return {"research": len(rounds), "checking": len(checks), "seconds": round(seconds),
+            "established": sum(1 for n in research(project) if n["state"] == "established"),
+            "launch": sum(1 for e in rounds + checks if e.get("ts", "") >= since) if since else None,
+            "limit": (runs[0]["settings"].get("spend") or None) if runs else None}
+
+
 def status(project, base):
     """Where a project stands, as plain text: is it running and on what, how far each claim got, what is next. This is
     what an assistant reads first when the person asks it what is going on."""
@@ -1193,7 +1211,7 @@ def status(project, base):
     live = [n for n in claims if n.get("status") not in ("contradicted", "superseded")]
     by, gate_by = (lambda state: [n for n in live if n["state"] == state]), {g["name"]: g for g in gates}
     line, ago = queue(claims), _ago
-    runs = launched(project)
+    runs, cost = launched(project), spent(project)
     alive = next((r for r in runs if r["alive"]), None)
     marks = [(i, e) for i, e in enumerate(events) if e["type"] == "activity" and re.match(r"((?:Round|Iteration) \d+ (started|finished|ended badly)|Loop stopped|A round ended without)", e.get("text") or "")]
     began = next(((i, e) for i, e in reversed(marks) if STARTED.match(e["text"])), None)
@@ -1220,8 +1238,8 @@ def status(project, base):
            *(["PROBLEM: " + config_problem(project) + ". The loop holds until it is fixed."] if config_problem(project) else []),
            "Gates: " + (" -> ".join(g["name"] + (" (refuter" if "refute" in g else " (rater" if "rate" in g else "") + (f', on {g["recipe"]}' if g.get("recipe") else "") + (")" if "command" not in g else "") for g in gates) + (" [built in; the project set none]" if "gates" not in cfg else "")
                         if gates else "none: every result is only a claim"),
-           f'Spent: {sum(1 for _, e in marks if STARTED.match(e["text"]))} research rounds and '
-           f'{sum(1 for e in events if e["type"] == "research" and e.get("source") == "gate" and "command" not in gate_by.get(e.get("gate"), {"command": 1}))} checking rounds (refuters and raters), for {len(by("established"))} established.',
+           f'Spent: {cost["research"]} research rounds and {cost["checking"]} checking rounds (refuters and raters), for {cost["established"]} established.'
+           + (f' This launch: {cost["launch"]} of {cost["limit"]} model rounds.' if cost["limit"] else ""),
            f'Counts: {len(by("established"))} established, {len(by("failed")) + len(by("error"))} stopped at a gate, {len(by("waiting"))} waiting for a gate, '
            f'{len([n for n in live if n.get("status") == "supported" and n["state"] in (None, "unchecked")])} claimed and unchecked, '
            f'{len([n for n in claims if n.get("status") == "contradicted"])} ruled out, {len(line)} queued, {len([n for n in live if n["stalled"]])} set aside']
@@ -1318,7 +1336,7 @@ class Handler(BaseHTTPRequestHandler):
                 offered, problem = launchers(), launcher_file()[1]
                 # epoch changes on every server start, so an open page knows to refetch instead of mixing two logs
                 self.reply(200, [{"id": p, "config": public_config(p), "count": len(load(p)), "epoch": BOOT, "hold": hold(p),
-                                  "launched": launched(p), "launchers": offered, "launcherError": problem} for p in project_ids()])
+                                  "launched": launched(p), "spent": spent(p), "launchers": offered, "launcherError": problem} for p in project_ids()])
             elif url.path in ("/api/terminal", "/api/run-details"):
                 host = self.headers.get("Host", "")  # a page on another site that resolves here must not read the terminal
                 if re.fullmatch(r"[\w.\-\[\]:]{1,100}", host) and urlparse("http://" + host).hostname not in ("127.0.0.1", "::1", "localhost"):
