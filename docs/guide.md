@@ -162,12 +162,16 @@ To run the loop yourself, from the folder the agent should work in:
 
 ## The page
 
-Three pages. **Overview**: whether it is running, what it is doing, what is established, what it cost. **Research**:
+Four pages. **Overview**: whether it is running, what it is doing, what is established, what it cost. **Research**:
 every frame and claim in the group the record puts it in, with each gate's verdict. **Live**: the loop's output as it
-happens, and each earlier round's handoff. The controls are Start, Stop, Settings, Mark as audited and Copy for
+happens, and each earlier round's handoff. **Write-ups**: see below. The controls are Start, Stop, Settings, Mark as audited and Copy for
 Claude. Everything else is done through an assistant.
 
 **Run details** beside the terminal shows the command and the exact text given to the agent for a round.
+
+**Write-ups** holds explanations your assistant wrote for you: how the target works, what a result means. Ask for
+one in plain words. Each is a Markdown file in `projects/<id>/writeups/`, so it can be shared, edited and kept like any
+document. A write-up is not part of the record: no round reads it and no gate checks it.
 
 ## The API
 
@@ -179,6 +183,7 @@ Claude. Everything else is done through an assistant.
 | `GET  /api/events?project=X&after=N` | The log, 5,000 events at a time |
 | `GET  /api/project?project=X`, `/api/projects` | Config; every project with its running loops and recipes |
 | `GET  /api/gates?project=X&agent=NAME` | What the loop should run next |
+| `GET  /api/writeup?project=X&name=N` | One write-up, with its text |
 | `POST /api/frames` | Queue places to look |
 | `POST /api/events` | An `activity`, a `note`, a `question`, or `research` |
 | `POST /api/project` | Set `goal`, `rules`, `target`, `direction`, `paused` or `loop` |

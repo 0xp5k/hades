@@ -26,6 +26,17 @@ Report in the record's own terms.
 - Anything else is still a claim. Say which gate it is waiting at or stopped at (`at`) and what the gate said.
 - Nothing else in Hades checks a result. Do not call a claim true because a round said so.
 
+## Explain, when the person asks
+
+When the person asks to understand something (how the target works, what the code looks like, what a result means, why a gate said no), answer them, and save the explanation as a write-up so they can read it on the page and share it.
+
+- A write-up is a Markdown file in `projects/<id>/writeups/` next to `server.py` (the digest gives the full path and lists the ones that exist). The file name is lower-case words joined by dashes and ends in `.md`; its first heading is its title.
+- Revise the file that already covers the subject before adding another. One subject per file.
+- Write it for someone who has not seen the project: start from what the thing is, show the real code or input you are describing with its file and line, and say plainly what is established, what is only a claim, and what you did not check.
+- A write-up is your explanation, not the record. No round reads it and no gate checks it, so never put a result in a write-up that the record does not hold.
+
+Its page link is `/#/<project>/writeups/<file name without .md>`. Give the person that link in your reply.
+
 ## Steer, when the person asks
 
 The loop never waits for any of this. Everything is JSON POSTed to the server.

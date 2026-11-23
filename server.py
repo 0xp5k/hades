@@ -16,6 +16,7 @@ What the loop, the page and a chat agent call:
   GET  /api/events?project=X&after=N          the log
   GET  /api/research?project=X&q=TEXT&area=A  every frame and claim, with where it stands
   GET  /api/gates?project=X                   the claims waiting for a gate, and what to run on each
+  GET  /api/writeup?project=X&name=N          one write-up: an assistant's explanation for the person, a Markdown file
   POST /api/frames   {"project", "frames"}    queue places to look, many at once
   POST /api/events   {"project", "type", ...} report: activity, note (a round's closing handoff), question or research
   POST /api/project  {"project", ...}         set goal, rules, target, direction, paused or loop
@@ -1185,6 +1186,29 @@ def plan(project, agent, hold=False):
     return "\n".join(out) + "\n", frame["id"] if frame else None
 
 
+def writeups(project, name=None):
+    """The project's write-ups: explanations an assistant wrote for the person, each a Markdown file in the project's
+    writeups/ folder. They are files so that they can be shared, edited and kept like any other document. They are not
+    part of the record: no round reads them and no gate checks them. With a name, that one with its text."""
+    folder, out = PROJECTS / check_name(project) / "writeups", []
+    files = sorted((f for f in folder.glob("*.md") if f.is_file() and NAME.match(f.stem)), key=lambda f: -f.stat().st_mtime)[:200] if folder.is_dir() else []
+    for f in files:
+        if name not in (None, f.stem):
+            continue
+        try:
+            text = f.read_text(encoding="utf-8", errors="replace")[:400000]
+        except OSError:
+            continue
+        head = next((line.lstrip("#").strip() for line in text.splitlines() if line.startswith("#") and line.lstrip("#").strip()), "")
+        out.append({"name": f.stem, "title": head[:120] or f.stem.replace("-", " "), "path": str(f.resolve()),
+                    "modified": dt.datetime.fromtimestamp(f.stat().st_mtime, dt.timezone.utc).isoformat(timespec="seconds"), **({"body": text} if name else {})})
+    if name is not None:
+        if not out:
+            raise ValueError("no write-up has that name")
+        return out[0]
+    return out
+
+
 def spent(project):
     """What the project has cost, in the one unit Hades counts: model rounds. A research round is one; so is each run
     of a refuter or a rater. "launch" is what the loops running now have used, against the launch's limit if it has one."""
@@ -1286,6 +1310,10 @@ def status(project, base):
                 "\n".join(told)[:1200]]
     elif silent >= 0:
         out += ["", "No handoff yet: the last round ended without a Handoff block, so nothing was recorded from it."]
+    pages = writeups(project)
+    out += ["", f'WRITE-UPS (your explanations for the person, shown on the page; each is a Markdown file in {(PROJECTS / project / "writeups").resolve()})',
+            *([f'- {w["name"]}.md: {w["title"]}' for w in pages[:20]] or ["- none yet"]),
+            "When the person asks to understand something, answer them and save the explanation there: revise the file that covers it, or add one."]
     p = f'"project": "{project}"'
     out += ["", f"WHAT YOU CAN DO (each is JSON POSTed to {base}; the loop never waits for any of it)",
             f'- Queue places to look: /api/frames {{{p}, "frames": ["..."]}}',
@@ -1336,7 +1364,7 @@ class Handler(BaseHTTPRequestHandler):
                 offered, problem = launchers(), launcher_file()[1]
                 # epoch changes on every server start, so an open page knows to refetch instead of mixing two logs
                 self.reply(200, [{"id": p, "config": public_config(p), "count": len(load(p)), "epoch": BOOT, "hold": hold(p),
-                                  "launched": launched(p), "spent": spent(p), "launchers": offered, "launcherError": problem} for p in project_ids()])
+                                  "launched": launched(p), "spent": spent(p), "writeups": writeups(p), "launchers": offered, "launcherError": problem} for p in project_ids()])
             elif url.path in ("/api/terminal", "/api/run-details"):
                 host = self.headers.get("Host", "")  # a page on another site that resolves here must not read the terminal
                 if re.fullmatch(r"[\w.\-\[\]:]{1,100}", host) and urlparse("http://" + host).hostname not in ("127.0.0.1", "::1", "localhost"):
@@ -1358,6 +1386,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.reply(200, text.encode(), "text/plain; charset=utf-8")
             elif url.path == "/api/gates":
                 self.reply(200, gates_pending(arg("project"), arg("agent")[:80]))
+            elif url.path == "/api/writeup":
+                self.reply(200, writeups(arg("project"), arg("name")[:80]))
             elif url.path == "/api/research":
                 self.reply(200, research(arg("project"), arg("q"), arg("area")))
             elif url.path == "/api/brief":

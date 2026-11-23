@@ -112,6 +112,7 @@
   .md table { border-collapse: collapse; font-size: 14px; }
   .md th, .md td { text-align: left; padding: 7px 16px 7px 0; border-bottom: 1px solid var(--hair); vertical-align: top; }
   .md th { color: var(--muted); font-weight: 500; font-size: 13px; white-space: nowrap; }
+  .md td:first-child { white-space: nowrap; }
   .kv { display: grid; grid-template-columns: minmax(90px, 150px) minmax(0, 1fr); gap: 8px 18px; margin: 4px 0 16px; font-size: 14px; }
   .kv dt { color: var(--muted); font-size: 13px; } .kv dd { margin: 0; overflow-wrap: anywhere; }
   @media (max-width: 620px) { .kv { grid-template-columns: minmax(0, 1fr); gap: 2px 0; } .kv dd { margin-bottom: 10px; } }
@@ -340,12 +341,12 @@ const usd = n => n > 0 && n < 0.01 ? "<$0.01" : "$" + n.toFixed(2);
 const compact = n => n >= 1e6 ? (n / 1e6).toFixed(1) + "M" : n >= 1e3 ? (n / 1e3).toFixed(1) + "k" : String(n);
 
 /* ---------- routing: #/<project>/<page>, and #/<project>/research/<id> to open one claim or frame ---------- */
-const PAGES = [["overview", "Overview"], ["research", "Research"], ["live", "Live"]];
+const PAGES = [["overview", "Overview"], ["research", "Research"], ["live", "Live"], ["writeups", "Write-ups"]];
 function route() {
   const parts = location.hash.replace(/^#\/?/, "").split("/").map(x => { try { return decodeURIComponent(x); } catch (e) { return x; } });
   const p = S.projects.find(p => p.id === parts[0]) || S.projects[0] || null;
   const [id, title] = PAGES.find(x => x[0] === parts[1]) || PAGES[0];
-  return { p, page: { id, title }, focus: id === "research" ? parts[2] || "" : "" };
+  return { p, page: { id, title }, focus: id === "research" ? parts[2] || "" : "", doc: id === "writeups" ? parts[2] || "" : "" };
 }
 const threads = p => S.research[p.id]?.list || [];
 const running = p => (p.launched || []).filter(x => x.alive);
@@ -412,12 +413,12 @@ function mdInline(s) {
       .replace(/(^|[\s(])\*([^*\s][^*\n]*)\*(?=[\s).,;:!?]|$)/g, "$1<em>$2</em>");
   }).join("");
 }
-function md(src) {
+function md(src, flow) {  // flow: a document wrapped at a fixed width, where a line break inside a paragraph is only a space
   const lines = String(src || "").replace(/\r/g, "").split("\n"), out = [];
   const cells = l => l.trim().replace(/^\||\|$/g, "").split("|").map(c => c.trim());
   const bullet = /^(\s*)([-*]|\d+[.)])\s+(.*)$/;
   let i = 0, para = [];
-  const flush = () => { if (para.length) { out.push(`<p>${para.map(mdInline).join("<br>")}</p>`); para = []; } };
+  const flush = () => { if (para.length) { out.push(`<p>${flow ? mdInline(para.join(" ")) : para.map(mdInline).join("<br>")}</p>`); para = []; } };
   while (i < lines.length) {
     const l = lines[i];
     if (/^\s*```/.test(l)) {
@@ -987,7 +988,26 @@ function liveLoop(p, d) {
 }
 
 /* ---------- rendering ---------- */
-const views = { overview, research: researchPanel, live: liveLoop };
+/* ---------- Write-ups: an assistant's explanations for the person. Markdown files in the project's folder, shown as they are. ---------- */
+function writeupsPanel(p) {
+  const list = p.writeups || [], { doc } = route(), one = list.find(w => w.name === doc) || list[0];
+  if (!list.length) return `<p class="goal">Nothing written yet. Ask your assistant to explain something about this project (how the target works, what a result means) and to save it as a write-up; it appears here.</p>`;
+  const key = one.name + ":" + one.modified, have = S.writeup && S.writeup.key === p.id + "/" + key ? S.writeup : null;
+  if (!have) loadWriteup(p.id, one.name, p.id + "/" + key);
+  const others = list.length > 1 ? `<nav class="box glass" aria-label="Write-ups"><ol class="rows">${list.map(w =>
+    `<li><a href="${href(p.id, "writeups")}/${encodeURIComponent(w.name)}" ${w.name === one.name ? 'aria-current="page"' : ""}>${w.name === one.name ? "<b>" + esc(w.title) + "</b>" : esc(w.title)}</a><span class="sub nowrap">${esc(ago(w.modified))}</span></li>`).join("")}</ol></nav>` : "";
+  return `${others}<article class="box glass"><div class="row"><p class="sub">Written by an assistant to explain. Not part of the record, and not checked by any gate. · ${esc(ago(one.modified))}</p>
+      <button class="btn small ghost" data-copy-writeup data-fk="copy-writeup">Copy as Markdown</button></div>
+    <div class="md">${have ? md(have.body, true) : '<p class="sub">Loading…</p>'}</div>
+    <p class="sub mt2">The file, to share or edit: <code>${esc(one.path)}</code></p></article>`;
+}
+async function loadWriteup(pid, name, key) {
+  if (S.writeupWanted === key) return;
+  S.writeupWanted = key;
+  try { S.writeup = { key, body: (await getJSON(`/api/writeup?project=${encodeURIComponent(pid)}&name=${encodeURIComponent(name)}`)).body }; } catch (e) { S.writeup = { key, body: "This write-up could not be read." }; }
+  render(true);
+}
+const views = { overview, research: researchPanel, live: liveLoop, writeups: writeupsPanel };
 let lastSig = "", lastNav = "", lastProj = "", lastPage = "", lastFocus = "", pendingScroll = "", pressing = false;
 addEventListener("pointerdown", () => { pressing = true; }, true);
 for (const type of ["pointerup", "pointercancel", "blur"]) addEventListener(type, () => { pressing = false; setTimeout(() => render(false), 0); }, true);
@@ -998,7 +1018,7 @@ function selecting() {
 function render(force) {
   const { p, page, focus } = route();
   if (focus && focus !== lastFocus) { lastFocus = focus; S.open.add("thread:" + focus); pendingScroll = "research-" + focus; }  // a link to one claim or frame
-  const sig = JSON.stringify([S.connected, S.loaded, p && p.id, page.id, focus, S.q, [...S.open], S.limit, watch, stopArmed, S.projects.map(x => [x.id, x.config, x.hold, x.launched, x.launchers, x.launcherError]),
+  const sig = JSON.stringify([S.connected, S.loaded, p && p.id, page.id, focus, location.hash, S.writeup?.key, p && p.writeups, S.q, [...S.open], S.limit, watch, stopArmed, S.projects.map(x => [x.id, x.config, x.hold, x.launched, x.launchers, x.launcherError]),
     p && (S.events[p.id] || []).length, p && S.research[p.id]?.key, Math.floor(Date.now() / 20000)]);
   // A background refresh must never pull the page out from under the reader: wait while text is selected or a
   // click is in progress (replacing a button between press and release would swallow the click).
@@ -1104,7 +1124,8 @@ document.addEventListener("click", async e => {
   const b = e.target.closest("button");
   if (!b) return;
   const { p } = route();
-  if (b.hasAttribute("data-run-info")) showRunInfo(b);
+  if (b.hasAttribute("data-copy-writeup")) { if (S.writeup) copy(S.writeup.body, "Copied as Markdown"); }
+  else if (b.hasAttribute("data-run-info")) showRunInfo(b);
   else if (b.hasAttribute("data-loop-stop")) {
     if (stopArmed > Date.now()) {
       stopArmed = 0;

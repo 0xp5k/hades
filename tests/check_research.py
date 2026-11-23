@@ -317,7 +317,7 @@ def check(directory):
         listing = next(x for x in call("/api/projects") if x["id"] == "lean")
         offered = listing["launchers"]
         assert sorted(offered) == ["bare", "fake", "wrap"] and offered["wrap"]["label"] == "Wrapper"
-        assert sorted(listing) == ["config", "count", "epoch", "hold", "id", "launched", "launcherError", "launchers", "spent"], sorted(listing)
+        assert sorted(listing) == ["config", "count", "epoch", "hold", "id", "launched", "launcherError", "launchers", "spent", "writeups"], sorted(listing)
         assert offered["fake"] == {"label": "fake", "model": "", "models": ["fable", "opus", "sonnet", "haiku"],
                                    "command": [str(claude), "-p"], "rounds": 200, "timeout_min": 1, "keep_background": False, "workers": 1, "spend": 0}, offered["fake"]
         assert offered["wrap"]["model"] == "base-model" and offered["wrap"]["models"] == ["base-model", "other"]
@@ -824,6 +824,30 @@ def check_units():
                 assert sure["budget"] == 4  # 5 is the person's to give: a round's own lead tops out at 4
                 server.ingest({"project": "w", "type": "research", "id": sure["id"], "status": "superseded", "source": "you"})
                 assert given is None and "Nothing is queued, so this round is yours" in text and f"- [{only}] the one place" in text.partition("SET ASIDE (their rounds are spent")[2], text
+            finally:
+                server.PROJECTS = kept
+        # Write-ups: an assistant's explanations for the person, as Markdown files in the project's folder. Read-only here.
+        with tempfile.TemporaryDirectory() as home:
+            kept, server.PROJECTS = server.PROJECTS, Path(home)
+            try:
+                (Path(home) / "u" / "writeups").mkdir(parents=True)
+                (Path(home) / "u" / "project.json").write_text(json.dumps({"goal": "g"}))
+                assert server.writeups("u") == [] and "- none yet" in server.status("u", "http://x")
+                (Path(home) / "u" / "writeups" / "how-the-parser-works.md").write_text("intro line\n\n# How the parser works\n\nIt reads a header.\n", encoding="utf-8")
+                (Path(home) / "u" / "writeups" / "notes.txt").write_text("not a write-up")
+                (Path(home) / "u" / "secret.md").write_text("# outside the folder")
+                listed = server.writeups("u")
+                assert [(w["name"], w["title"]) for w in listed] == [("how-the-parser-works", "How the parser works")] and "body" not in listed[0], listed
+                one = server.writeups("u", "how-the-parser-works")
+                assert one["body"].endswith("It reads a header.\n") and one["path"].endswith("how-the-parser-works.md")
+                for bad in ("../secret", "nope", ""):
+                    try:
+                        server.writeups("u", bad)
+                        raise AssertionError(f"a write-up named {bad!r} was served")
+                    except ValueError:
+                        pass
+                assert "- how-the-parser-works.md: How the parser works" in server.status("u", "http://x")
+                assert "How the parser works" not in server.brief("u", "a")  # a round never reads them: they are not the record
             finally:
                 server.PROJECTS = kept
         # A launch's spend limit is split between its loops, and each loop stops once its share of model rounds is used.
