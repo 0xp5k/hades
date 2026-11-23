@@ -20,9 +20,10 @@ cd hades
 
 1. Answer yes when it asks to allow the Start button. The page then opens.
 2. Type what to research, then press **Start**.
-3. Watch Claude work in **Live loop**. Type there to steer it, and read what it found on the project brief.
+3. Watch it work. Nothing waits for you: each round takes the best place to look, every result is attacked by a fresh round before it counts, and the page ranks what survived.
+4. To steer it or have it explained, open Claude and say: `Read http://127.0.0.1:8765/api/status and follow http://127.0.0.1:8765/AGENTS.md to help me with Hades.`
 
-Rounds have no time limit. In the loop settings you can pick the model, choose **explore** to let Claude follow its nose, and run up to five workers at once. It runs the same way on Windows, macOS and Linux.
+For stronger checking than the built-in refuter, give a project gates of its own (a replay under a sanitizer, a proof that builds) or ask Claude to write them. Rounds have no time limit. It runs the same way on Windows, macOS and Linux.
 
 Your project records stay on your machine.
 

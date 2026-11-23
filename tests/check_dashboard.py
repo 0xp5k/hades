@@ -151,10 +151,10 @@ sys.exit(0 if sys.stdin.read() == "" else 3)
                 return True
             time.sleep(0.1)
         return False
-    server = lambda path, body=None: json.dumps({"granted": True}) if path.startswith(("/api/project?", "/api/slot")) else "b"
+    server = lambda path, body=None: "{}" if path.startswith("/api/project?") else "b"
     signals = {name: signal.getsignal(getattr(signal, name)) for name in ("SIGTERM", "SIGBREAK") if hasattr(signal, name)}
     runner_code = ("import json, sys; sys.path.insert(0, sys.argv[1]); from scripts import loop\n"
-                   "loop.call = lambda path, body=None: json.dumps({'granted': True}) if path.startswith(('/api/project?', '/api/slot')) else 'b'\n"
+                   "loop.call = lambda path, body=None: '{}' if path.startswith('/api/project?') else 'b'\n"
                    "loop.time.sleep = lambda s: None\n"
                    "sys.argv = ['loop.py', 'p', '--no-notes'] + sys.argv[2:]\nloop.main()")
     bystander = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])  # never the loop's to end
@@ -278,45 +278,29 @@ sys.exit(0 if sys.stdin.read() == "" else 3)
             assert code == 0 and output.strip() == "Handoff: the brief", (code, output)
         print("Skipped on Windows: Ctrl-Break and a console's standard input need an interactive console, which CI lacks.")
 
-    # Every round reports its wall-clock time whatever the harness, the harness receives the handoff instruction, and a
-    # round that edits the protected checker files is reported before the round's own event without changing its outcome.
+    # Every round reports its wall-clock time whatever the harness, and the harness receives the handoff instruction.
     events = []
 
     def server(path, body=None):
         events.append(body)
-        return json.dumps({"granted": True, "protected": ["checker/**", "verify.py", "/etc/passwd", "../outside.py", "link.py"]}) \
-            if path.startswith(("/api/project?", "/api/slot")) else "brief"
-    edit = ("import os, sys; ok = sys.stdin.read() == sys.argv[1]\n"
-            "if os.path.exists('verify.py'):\n"
-            "    open('checker/check.py', 'a').write('# loosened'); open('checker/new.py', 'w').write(''); os.remove('verify.py')\n"
-            "print('Handoff: done'); sys.exit(0 if ok else 5)")
+        return "{}" if path.startswith("/api/project?") else "brief"
+    echo = "import sys; ok = sys.stdin.read() == sys.argv[1]; print('Handoff: done'); sys.exit(0 if ok else 5)"
     here = os.getcwd()
-    with tempfile.TemporaryDirectory() as work, tempfile.TemporaryDirectory() as away:
+    with tempfile.TemporaryDirectory() as work:
         os.chdir(work)
         try:
-            Path("checker/data").mkdir(parents=True)
-            Path("checker/check.py").write_text("assert True\n")
-            Path("verify.py").write_text("print('ok')\n")
-            Path(away, "outside.py").write_text("x")
-            if os.name == "posix":
-                os.symlink(Path(away, "outside.py"), "link.py")
-            before = loop.fingerprint(["checker/**", "verify.py", "link.py", "../outside.py"])
-            assert sorted(before) == ["checker/check.py", "verify.py"], before
             with patch.object(loop, "call", server), patch.object(loop.time, "sleep", lambda s: None), \
                     patch.object(loop.sys, "stdout", io.TextIOWrapper(io.BytesIO(), newline="\n", encoding="utf-8")), \
                     patch.object(loop.sys, "argv", ["loop.py", "p", "--agent", "a", "--max-iterations", "2", "--no-notes", "--",
-                                                    sys.executable, "-c", edit, "brief\n\n" + loop.HANDOFF]):
+                                                    sys.executable, "-c", echo, "brief\n\n" + loop.HANDOFF]):
                 loop.main()
         finally:
             os.chdir(here)
             for name, handler in signals.items():
                 signal.signal(getattr(signal, name), handler)
     texts = [e.get("text") for e in events if e and e.get("type") == "activity"]
-    report = "Checker changed during round 1: checker/check.py, checker/new.py, verify.py"
-    assert texts.count(report) == 1 and texts.index(report) + 1 == texts.index("Iteration 1 finished (exit 0)"), texts
-    assert "Iteration 2 finished (exit 0)" in texts and not any("round 2" in t for t in texts), texts
-    tamper = next(e for e in events if e and e.get("text") == report)
-    assert tamper["data"]["tamper"] == ["checker/check.py", "checker/new.py", "verify.py"] and tamper["data"]["loop_session"]
+    assert texts == ["Iteration 1 started", "Iteration 1 finished (exit 0)", "Iteration 2 started", "Iteration 2 finished (exit 0)",
+                     "Loop stopped: reached 2 iterations"], texts
     finished = [e for e in events if e and e.get("text") == "Iteration 1 finished (exit 0)"]
     assert len(finished) == 1 and set(finished[0]["data"]["stats"]) == {"seconds"} and finished[0]["data"]["loop_session"], finished
 
@@ -334,13 +318,10 @@ def check(directory):
         with urlopen(base + route, body, timeout=3) as response:
             return json.load(response)
 
-    archive = Path(directory) / "reports"
-    archive.mkdir()
-    snapshot = archive / "workspace.json"
     message = "Review complete — résumé 日本語"
     for first in (True, False):
         proc = subprocess.Popen([sys.executable, "server.py", "--dashboard"], cwd=directory,
-                                env={**os.environ, "PROJECT_VIEW_PORT": str(port), "HADES_EVIDENCE_DIR": str(archive)})
+                                env={**os.environ, "PROJECT_VIEW_PORT": str(port)})
         try:
             for _ in range(100):
                 if proc.poll() is not None:
@@ -378,21 +359,6 @@ def check(directory):
                 assert forwarded.stdout == prompt.encode()
                 assert get(route + "1")[0]["argv"] == command
                 assert get(route + "2") == []
-                claim = {"project": "workspace", "type": "item", "section": "experiments",
-                         "key": "Sample", "status": "claimed", "revision": "forged"}
-                saved = get("/api/events", claim)
-                assert len(saved["revision"]) == 32 and saved["revision"] != "forged"
-                assert not get("/api/projects")[0]["experimentChecks"]
-                record = {"experiment": "Sample", "revision": saved["revision"], "outcome": "inconclusive",
-                          "build": "sample", "configuration": "default", "evidence": "artifact-1"}
-                snapshot.write_text(json.dumps({"project": "other", "checks": [record]}))
-                assert "error" in get("/api/projects")[0]["experimentChecks"]
-                snapshot.write_text(json.dumps({"project": "workspace", "checks": [record]}))
-                assert get("/api/projects")[0]["experimentChecks"]["records"] == [record]
-                assert get("/api/events", claim)["revision"] != record["revision"]
-                snapshot.write_text("{")
-                assert "error" in get("/api/projects")[0]["experimentChecks"]
-                snapshot.unlink()
                 count = get("/api/projects")[0]["count"]
                 get("/api/events", {"project": "workspace", "type": "item", "section": "now",
                                     "key": "Current update", "body": message})

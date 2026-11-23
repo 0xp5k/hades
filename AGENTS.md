@@ -1,35 +1,84 @@
-# Project reporting
+# Working with Hades
 
-When the user is working on a Hades project, use the running dashboard as the shared project record. Use the server and project from the dashboard URL or workspace context. The local server defaults to http://127.0.0.1:8765. List projects with GET /api/projects. If only one project exists, use it. If several projects fit and the context does not identify one, ask which project the user means. Read its configuration and latest updates before reporting what happened.
+Hades runs a research loop and keeps its record. This file is for an assistant the person is talking to: how to see what the loop is doing, explain it, and steer it for them. The server is local and defaults to http://127.0.0.1:8765; use the address from the page or the context if it differs.
 
-When the evidence or the user's direction changes, update the existing project brief. Read the project events with GET /api/events?project=ID and use the after offset for additional pages. Preserve the current note key in section `now`, or use `Current update` on a new blank brief. POST /api/events with the project ID, type `item`, section `now`, key and complete Markdown body. Check the saved version. Keep evidence references and open questions where the next reader can find them.
+**If you are a round inside the loop** (you were started with a brief that ends in a Handoff block), none of this is for you. Do what the brief says, end with the handoff, and do not call the server.
 
-When the user asks to understand something about the project, publish or revise the explanation in its Library as part of answering. Check the project's configured note sections and its latest `topic` events for an existing page about the subject, even if the user phrased it differently.
+## The words
 
-- For an existing topic, reuse its exact `key`. For a new topic, choose a short reader-facing title. POST JSON to `/api/events` with `project`, `type` set to `topic`, `key`, your `agent` name and the complete Markdown explanation in `body`. A topic appears immediately in the Library in every project phase. Its link is `/#/<project>/t.<title>` with each path component URL-encoded.
-- If the explanation already lives in a configured note section, revise its existing `item` events by section ID and item key. Its link stays `/#/<project>/s.<section-id>`.
-- If a grid card introduces the subject, preserve its content and set its `data.page` to `t.<title>` for a topic or the section ID for a configured note.
+- **Thread**: one line of the record, with an id like `k12`. It is one of the next three things.
+- **Frame**: a place to look, not yet settled. Leads from a round become frames; you can queue them.
+- **Claim**: what a round says it found when it settles a frame. **Ruled out**: the frame was examined and nothing was there.
+- **Gate**: a test a claim must pass. **Established**: the claim passed every gate. **Waiting**: a gate is due and runs after the next round. **Stopped**: a gate said no, or could not run. **Unchecked**: the next gate is a command and the claim named nothing to run it on.
+- **Score**: 1 to 5, how many rounds a frame is worth; 3 if nobody said. A round spends one when it starts on the frame. **Set aside**: the rounds are spent and the frame is still open; it leaves the queue.
+- **Assumption**: something a round decided in the person's place.
+
+## See what is going on
+
+Read `GET /api/status?project=ID` first. It is plain text: whether the loop is running and on what, how far each claim got, what is queued, what a round assumed in the person's place, and the latest handoff. Without `project` it lists the projects. If several fit and the context does not say which, ask.
+
+When the digest is not enough: `GET /api/research?project=ID` returns every thread with where it stands, and `GET /api/events?project=ID&after=N` returns the log, 5,000 events at a time. A thread's page link is `/#/<project>/research`.
+
+Report in the record's own terms.
+
+- A result is **established** only when the thread's `state` is `established`: it passed every one of the project's gates. Say which gates. A gate that is a refuter (a fresh round that tried to kill the claim and could not) is weaker than a command that passed; say which kind it was.
+- Any other `state` means it is still a claim. Say which gate it is waiting at or stopped at (`at`) and what the gate said.
+- An **assumption in force** is something a round decided in the person's place because nobody was there to ask.
+- Nothing else in Hades checks a result. Do not describe a claim as true because a round said so.
+
+## Explain
+
+When the person asks to understand something about the project, publish or revise the explanation in its Library as part of answering. Check the latest `topic` events and the project's note sections for an existing page about the subject, even if the person phrased it differently.
+
+- For an existing topic, reuse its exact `key`. For a new one, choose a short reader-facing title. POST JSON to `/api/events` with `project`, `type` set to `topic`, `key`, your `agent` name and the complete Markdown explanation in `body`. Its link is `/#/<project>/t.<title>` with each path component URL-encoded.
+- If the explanation already lives in a note section, revise its `item` events by section ID and item key. Its link stays `/#/<project>/s.<section-id>`.
 
 Read back the saved content and include the page link in your reply.
 
-The project's `direction`, its loop settings, `simple` and the `priority` mark on research threads are the person's. A worker running inside a loop follows them and never sets or clears them. Never edit files listed in the project's `protected` patterns.
+## Steer, when the person asks
 
-## Changing settings for the person
+The loop never waits for any of this. It works the best open frame, and when none is left it widens and finds more. Everything here changes what it does next; nothing here is needed for it to carry on. All of it is JSON POSTed to the server.
 
-When the person is talking with you and asks to change how the loop runs (the model, rounds, time limit, round style, number of workers, tools, brief style or their standing direction), make the change for them:
+| To | Send |
+|---|---|
+| Queue places to look | `/api/frames` `{"project", "frames": ["text", {"text", "score", "area", "next"}]}` |
+| Put a thread at the front, with its rounds to spend again | `/api/events` `{"project", "type": "research", "id", "priority": true, "source": "you"}` |
+| Say how many rounds a frame is worth (1 to 5) | the same, with `"score": 4` |
+| Drop a thread, or reopen it | the same, with `"status": "superseded"` or `"open"` (`"contradicted"` rules it out; no other status can be set this way) |
+| Overrule an assumption | `/api/events` `{"project", "type": "question", "id", "answer": "...", "source": "you"}` |
+| Tell every round something | `/api/project` `{"project", "direction": "..."}` (`""` removes it) |
+| Change the goal, target or rules | `/api/project` `{"project", "goal": "..."}` |
+| Hold the loop before its next round, or release it | `/api/project` `{"project", "paused": true}` |
+| Record that the person checked a claim themselves | `/api/events` `{..., "id", "audited": true, "source": "you"}`, only when they say they did |
 
-```sh
-curl -s -X POST http://127.0.0.1:8765/api/coordinate -H 'Content-Type: application/json' \
-  -d '{"tool": "loop_settings", "args": {"project": "<id>", "model": "fable", "timeout_min": 0, "style": "explore"}}'
+Use the person's own words for a direction or an answer. Tell them what is now set.
+
+## Gates
+
+A gate is a test a claim must pass before it counts. A project that sets none gets one built in: after each round, a fresh round is shown only the claim and told to refute it. That needs no setup, and it is the weakest kind.
+
+When the person wants stronger checking, write the gates for them. There is no API for this: edit the file `projects/<id>/project.json` next to `server.py`, and put each gate's script in that same folder. The server reads the file fresh every time, so the change is live at once. Listing any `gates` replaces the built-in one, so add a `refute` gate of your own if you still want a refuter. If the file stops being valid JSON the loop holds and the digest says so.
+
+```json
+"artifact": "the path of a file holding the input that triggers the fault",
+"lock": ["scope.md", "replay.py"],
+"gates": [
+  {"name": "reproduces", "command": "python3 {project}/replay.py"},
+  {"name": "not known", "refute": "Look for an earlier report of this exact fault. It is refuted only if you can cite one."}
+]
 ```
 
-Only the keys you send change, `null` clears one back to the recipe's own value, and sending just the project returns what is set now. The keys: `recipe`, `model`, `rounds` (0 = until stopped), `timeout_min` (0 = no limit), `reply_wait` (seconds; 0 = never), `keep_background`, `style` (`focused` or `explore`), `agents` (1 to 5), `tools` (`recipe`, or `wide` to add web search, web fetch and subagents), `direction` and `simple`. Tell the person what is now set. Change only what they asked for. Starting a loop spends their model usage, so say what you are about to start and wait for a yes.
+A command gate is run with the claim's artifact as its last argument, and exit code 0 passes. It runs in the folder the claim's round worked in (a launched loop works in `agent-work/<id>/<recipe>-1/`), so a relative artifact path is found there. A claim that names no artifact cannot be run through a command gate and stays unchecked until a round claims it again with one. Order them cheapest first: it is true, it is the thing asked, it is new, it is usable. `lock` names files in that folder that define the question; when they or the gates change, every earlier verdict stops counting and the gates run again. Test a gate on something that should pass and something that should not before you leave it in place, and show the person what you wrote. Never loosen or remove a gate unless they ask.
 
-On the Experiments page, an item status describes the reporting agent’s assessment. Cite the verifier record and its build and configuration before describing a result as confirmed. An edit creates a new experiment revision.
+A round inside the loop never touches gates, never reports a verdict, and never sets `audited`.
 
-For the Evidence view, use an existing component name in `data.component` on experiments or in `area` on findings and research notes. Add a saved evidence reference when one is available. Review priority reflects gaps in the evidence and verifier coverage.
+## Run
 
-When creating a one-off wrapper that changes the CLI prompt, forward its final batch invocation through the Run details capture helper described in the guide. This lets the operator inspect the actual command and input, including wrapper edits.
+A project runs one loop at a time. `POST /api/launch {"project": "<id>"}` starts it with the saved settings and `POST /api/stop {"project": "<id>"}` stops it. Starting a loop spends the person's model usage, so say what you are about to start and wait for a yes.
+
+To change how it runs, read `GET /api/project?project=<id>`, change the keys asked for, and send the whole `loop` object back with `POST /api/project {"project", "loop": {...}}`; a key you leave out returns to the recipe's own value. The keys: `recipe`, `model`, `rounds` (0 = until stopped), `timeout_min` (0 = no limit), `reply_wait` (seconds; 0 = never), `keep_background`, and `tools` (`recipe`, or `wide` to add web search, web fetch and subagents).
+
+`POST /api/new {"project", "goal", "target", "agent_files"}` creates a project: `goal` is what to research, `target` (optional) says what is being studied and where it lives, and `agent_files` (optional) is a folder whose contents the loop's working folder starts with. A project id that does not exist is refused everywhere else, so a typo never starts a second project.
 
 ## Changing the harness
 

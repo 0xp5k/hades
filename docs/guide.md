@@ -1,118 +1,215 @@
 # Hades guide
 
+Hades is a research loop with a page on top. Each round starts Claude (or another harness) fresh, hands it a brief
+generated from the project's record, and saves the round's closing handoff back into that record. The next round's brief
+is built from it.
+
+Nothing in it waits for you. The loop picks its own next piece of work, has every result attacked before it counts, and
+when it needs a decision only you could make it takes the cautious option and writes down what it assumed. You use the
+page to start it and to see everything. To steer it or have it explained, talk to Claude and point it at the server:
+`AGENTS.md` is its manual, and `GET /api/status?project=X` is what it reads first.
+
 ## Start it
 
     git clone https://github.com/0xp5k/hades && cd hades
     python3 scripts/hades.py
 
-That one command checks the install (eleven checks, about five seconds, no model needed), starts the page and the verifier
-together and opens http://127.0.0.1:8765. The first time, it asks once whether the page's Start button may run Claude
-Code on this machine (saying yes copies `launchers.example.json` to `launchers.json`, which you can edit later), and it
-creates one empty lean project. Type what to research on the page and press Start.
-
-Or have an assistant do it. Open Claude Code, or any coding agent, in this folder and say:
-
-    Get Hades running for me. Follow "If you are an assistant" in docs/guide.md.
-
-Other ways in:
+That one command checks the install (eight checks, a few seconds, no model needed), starts the page and opens
+http://127.0.0.1:8765. The first time, it asks once whether the page's Start button may run Claude Code on this machine
+(saying yes copies `launchers.example.json` to `launchers.json`, which you can edit later), and it creates one empty
+project. Type what to research on the page and press Start.
 
     python3 scripts/hades.py check   # only the check; exits 0 if everything works
-    python3 demo/run.py          # three demo projects with simulated agents, to look around without any model
-    python3 server.py        # the page on its own, when the verifier runs somewhere else
+    python3 server.py                # the page on its own
 
-## Try it on the practice project
+The server listens on this machine only. Everything that can reach it is trusted, so run it where you would run the
+agents themselves.
 
-To try a ready-made target, add the practice project with `python3 scripts/hades.py new tinyvm practice`.
-It contains a small interpreter with 17 planted defects and a hidden answer key. Start an agent whichever way you like:
+## One round
 
-    sh run-live.sh practice 3        # in another terminal: one Claude Code agent, three rounds
+1. The loop stops if it has reached its round or time limit, or a file named `STOP` exists in its folder. It waits while
+   the project is paused.
+2. It fetches the brief: `GET /api/brief?project=X&agent=NAME`. While a frame is queued, the brief gives the round that
+   one frame to settle. When none is, the round widens: it looks for places worth looking and proposes them.
+3. It runs the harness command with the brief on standard input (`{brief_file}` and `{brief}` in an argument are
+   replaced with a file holding it and with the text).
+4. It saves the last 6,000 characters the harness printed as a note on the Round notes page.
+5. If the project has gates, it runs them in order on each result the round claimed with an artifact, then goes again.
 
-- **By talking to Claude:** see "Run it by talking to an agent" below.
+Every round is asked to end with this block:
 
-Watch the page while it works: results arrive on Runs, the verifier confirms or rejects each one, and the map of the
-machine fills in from what the verifier measured. Then compare against the answer key:
+    Handoff: <what you did and what you observed>
+    Results: <one line per result claimed; [known: reference] or [new] at the end of a line>
+    Ruled out: <one line per approach that does not work, with the reason>
+    Assumed: <anything only you could have decided: the cautious choice it made instead>
+    Leads: <one line per new place worth looking, each with its quickest test and [score: 1-5]>
+    Next: <the single most useful next step>
 
-    python3 toys/tinyvm/answer_key.py score practice
+The server keeps the record from it. The text after the last `Handoff:` becomes the Project brief's `Current update`.
+Each `Results:` line becomes a research thread (kind `conclusion`, status `supported`, with `known` from its tag). Each
+`Ruled out:` line becomes a contradicted thread. Each `Leads:` line becomes an open thread, a frame for a later round.
+Each `Assumed:` line is kept as an assumption in force: later rounds keep to it until you overrule it. A line that starts with a thread's id in brackets, like
+`[k12]`, settles that thread in place instead of adding one. Repeats of an existing thread or an assumption already in force are
+skipped. The id has to start the line; one in the middle of a sentence is read as prose. A heading works as well as a
+colon (`## Results`). A round whose output has no Handoff line records nothing, and the log says so.
 
-In our own runs Claude Code agents found all 17 in under six minutes. They have the source, so this is the easy one.
+## How the pieces fit
 
-Two harder targets are included:
+There is one kind of record, the thread, and it moves through three stages.
 
-    python3 scripts/hades.py new stdlib      # 25 real parsers from Python's standard library; no answer key
+- A **frame** is a place to look: an open thread. Leads become frames; you can add them; a list can be queued at once.
+- A round settles a frame into a **claim** (a result, ideally with an artifact) or **rules it out** (with what was
+  examined, so the ground is not covered twice).
+- A claim with an artifact goes through the project's **gates**. One that passes them all is **established**.
 
-- **`stdlib`** is a real target: property lists, tar and zip archives, email, time zone files, TOML and twenty more. A
-  defect is an input that makes a parser fail with an error it should not raise for bad input. Nobody knows how many
-  there are. Plain random input finds 3 in 2.6 million tries, which is the bar for agents to beat. In our own run,
-  three Claude Code (Sonnet) agents confirmed 24 in three short rounds, about five minutes, with no repeats between them.
-- **`toys/blackbox`** has no source to read, only a service to send programs to, and 24 planted defects.
+The loop always works the best open frame. The page always shows the claims that got furthest first. Everything below
+is detail on those two sentences.
 
-The answer key is in this same folder. The brief tells agents to stay in their working folder, but nothing enforces
-that. For a measurement you care about, move `toys/*/answer_key.py` off the machine first.
+## Gates
 
-## Start a real project
+A result is the agent's claim until something outside the round that made it tests it. Gates are those tests, in the
+order a claim must pass them.
 
-1. Click **+ Project**, name it, and describe the target in your own words.
-2. Start a survey agent with the command the page shows. It studies the target, writes the Understand page so you can
-   learn the target too, and proposes a goal, a map of what to cover, and a scoring script.
-3. Read the proposal, including the whole scoring script, then approve it or send it back with comments.
-4. Start agents. Each round they get a fresh brief: the routine to follow plus where things stand right now.
+**You do not have to set any up.** A project with no `gates` of its own gets one built in, called `refutation`: after
+each round, a fresh round is shown only the claim and told to make it fail three ways (make it happen again, hold it
+against the goal as stated, find where it was already reported). It costs one extra round per claim, at most four per
+research round, and it is the weakest kind of gate. `"gates": []` turns gating off.
 
-    python3 scripts/loop.py my-project --agent a-1 -- claude -p   # everything after -- is your own harness command
+For stronger checking, add your own to the project's `project.json`, or ask Claude to write them. The API cannot set
+them, so a round cannot change them through the server.
 
-`python3 scripts/hades.py` already runs the verifier. If you started `server.py` on its own, run `python3 scripts/verifier.py` too, and
-keep it where agents cannot write.
+    "artifact": "the path of a file holding the input that triggers the fault",
+    "lock": ["scope.md", "replay.py"],
+    "gates": [
+      {"name": "reproduces", "command": "python3 {project}/replay.py"},
+      {"name": "default build", "command": "python3 {project}/default_build.py", "timeout_min": 20},
+      {"name": "not known", "refute": "Look for an earlier report of this exact fault. It is refuted only if you can cite one."}
+    ]
 
-`scripts/loop.py` works with any harness that takes a prompt on standard input or as a file (`{brief_file}`).
-`run-live.sh` is a ready-made wrapper for Claude Code; `check-harness.sh` tries Codex or OhMyPi for one round.
+A gate is one of two things.
 
-## Run it by talking to an agent
+- **A command.** It is run once per claim, with the artifact the claim names as its last argument (or wherever you write
+  `{artifact}`). It is a list of arguments, or one string split with POSIX shell rules. `{project}` is the project's own
+  folder under `projects/`, which is where a gate's script and anything it compares against should live, outside the
+  folder the agent works in. **Exit code 0 passes; anything else fails.** A gate that cannot start or runs out of time
+  (`timeout_min`, default 10) is recorded as "could not run", and is run again after later rounds, three times in all,
+  before the claim is left there. On Windows write paths with forward slashes or use the list form, and make the gate
+  an `.exe` or a script run by an interpreter: a `.cmd` or `.bat` gate is refused, because `cmd.exe` would read the
+  artifact's name as part of a command line.
+- **A refuter.** The loop starts the same harness fresh and gives it only the claim, its artifact and your instruction.
+  It has not seen how the claim was reached. It must end with `Verdict: refuted - <concrete evidence>` or
+  `Verdict: stands - <what it tried>`. Use this where no command can decide: has it been reported before, does it answer
+  the question as you meant it. A refuter that finds nothing is weaker evidence than a command that passes, so put
+  command gates first.
 
-Nothing to install. Open Claude Code on the same machine and say:
+How a claim moves:
 
-    Read http://127.0.0.1:8765/api/coordinator and act as my coordinator for Hades.
+- Every Results line is a claim, and every claim is gated. The agent ends a line with `[check: <artifact>]` to name
+  what should be checked; `artifact` in `project.json` tells it what to name. A command gate needs one. A refuter can
+  work from the claim alone.
+- After the round has ended, the loop runs the first gate in the folder that round worked in, where its artifact is. A
+  pass makes the next gate due. The first gate that fails stops the claim there. The agent never reports its own
+  verdict. A verdict counts only for the artifact the claim names now.
+- The last of each gate's output is kept on the thread.
+- A claim that a gate stopped becomes work again. The next brief shows what the gate said, and a round can repair it and
+  claim it again by its id, which runs every gate again on the new artifact, or rule it out.
 
-It reads a short guide from the server and can then create projects, start and stop agents, queue tasks, change run
-settings and tell you what needs you. To have the same abilities built in as tools instead:
+**Verdicts are bound to the question.** `lock` names files in the project's folder: the exact statement of what you are
+asking, the scope, a gate's own script. Every verdict is stamped with a fingerprint of the gates and those files. Change
+any of them and every earlier verdict is stale: it counts for nothing, the page shows the gate as due again, and the
+loop reruns it after the next round. A gate that was running while you changed them is thrown away and run again. So
+you can sharpen the question without old passes surviving it. Rewording a claim does the same to that claim.
 
-    claude mcp add --transport http hades http://127.0.0.1:8765/mcp
+**Your audit.** On any claim, **Mark as audited** records that you looked at it yourself. It lapses when the claim's
+artifact, the gates or the locked files change.
 
-The coordinator cannot approve a setup proposal or answer agents' questions for you. Those stay with you, on the page.
+What good gates look like, cheapest first:
 
-## If you are an assistant
+- *It is true.* Replay the input under a sanitizer in a clean container. Build the proof with no holes. Rerun the
+  experiment from its seed.
+- *It is the thing asked.* The fault is reached from untrusted input in a default build. The theorem's statement is the
+  locked one, character for character. The benchmark is the agreed one.
+- *It is new.* A refuter that must cite the earlier report, advisory or paper.
+- *It is usable.* The proposed fix stops the reproduction and the project's own tests still pass.
 
-A person has asked you to get Hades running on this machine. Do this, in order:
+A gate sees the artifact name exactly as the agent wrote it, so treat it as untrusted input.
 
-1. Run `python3 scripts/hades.py check`. If any line says FAIL, stop and show the person that output.
-2. Ask the person one question: may the page, and you, start agents on this machine? Saying yes lets the server run the
-   agent command in `launchers.example.json`, and nothing else.
-3. Start the server in the background, because it does not exit: `python3 scripts/hades.py --skip-check --no-open`, adding
-   `--allow-launch` only if they said yes.
-4. Read `http://127.0.0.1:8765/api/coordinator` and follow it. It lists your tools and the rules.
-5. Tell the person to open http://127.0.0.1:8765. If the workspace includes `practice`, offer to start one agent there. Starting
-   agents spends their model usage, so say how many agents and rounds, and wait for a yes.
+## Frames
 
-## Starting agents from the server
+While a frame is queued, each round is given one and asked to settle it. That keeps a fresh round from drifting back to
+whatever the last one found, and it makes "what is the loop doing next" a question with an answer. When the queue is
+empty the round widens instead: it follows its nose and ends with new leads, each scored. So the loop alternates on its
+own between finding places to look and settling them, and never stops to ask.
 
-Off by default. `python3 scripts/hades.py --allow-launch` switches it on for Claude Code; or copy `launchers.example.json` to
-`launchers.json` yourself and edit the command for your harness. Each entry is a
-named recipe that the coordinator or launch API can start and stop. Launched agents work in
-`agent-work/<project>/<agent>/`, where `loop.log` holds each one's output. A project can name a folder (`agent_files`)
-that every new agent starts with a copy of. `loop.pid` there lets a restarted server find a loop it started before:
-a new launch skips that name, and stopping the project's agents stops it too.
+- **Where frames come from.** A `Leads:` line in any handoff. The **Add thread** button. Or a list, all at once:
 
-`launchers.json` is read again at every launch, so you or an agent can change the harness while the server runs (see
-"Changing the harness" in `AGENTS.md`). `POST /api/launch` takes an optional `"model"` for that launch only: it replaces the
-value after `--model`, `-m` or `--model=` in the recipe, or adds `--model` to a bare `claude` command; a recipe that names no
-model and is not `claude` is refused. `GET /api/projects` lists each recipe under `launchers` with its model, the `models`
-to choose from, whether it runs live, and its command, plus `launcherError` when part of the file could not be used.
-The example recipe allows Claude's file and shell tools without a narrower list. Web access is left out; adding
-`WebFetch` or `WebSearch` to `--allowedTools` is your decision.
+      curl -s -X POST http://127.0.0.1:8765/api/frames -H 'Content-Type: application/json' \
+        -d '{"project": "my-project", "frames": ["src/parse.c: length fields", {"text": "src/net.c: framing", "score": 5}]}'
 
-**Loop settings.** `"loop"` in `project.json` holds the settings every launch on the project uses, set from this machine
-with `POST /api/project {"project", "loop": {...}}`. The object replaces the stored one; unknown keys and nulls are dropped
-and a bad value is refused with its name. A launch takes each from its request, else `loop`, else the recipe's field of
-the same name, else the default. With one recipe it is used without naming it. The launch reply and each `launched`
-entry show the resolved `settings`.
+  An entry that repeats an existing thread is skipped.
+- **Score.** Each frame has a score from 1 to 5: how many rounds it is worth. A lead can carry one, `[score: 4]`, at the
+  end of its line; a queued frame can carry one; otherwise it is 3. A round spends one when it starts on the frame, so a round that crashes or prints nothing counts.
+  When they are spent the frame is **set aside**: it leaves the queue. Later rounds are told it was tried, and to come
+  back to it only as a new lead with a new angle.
+- **Order.** Frames you marked with **Pursue** first. Then whatever is furthest through the gates: a claim stopped at a
+  later gate is nearer a result than a fresh frame, while one stopped at its first gate ranks with the frames. Then the
+  highest score. Then the oldest. The Research page lists open leads in this order and marks the one that is next.
+- **Pursue** puts a frame at the front and gives it its rounds to spend again. **Drop** removes it.
+- **What the round is told.** The frame, its quickest test, and that it must end one of two ways: a Results line that
+  starts with the frame's id, or a Ruled out line that starts with it and says what was examined. With gates behind it,
+  the round is also told to work as if the frame pays off. The gates are what make that safe: an assertive brief always
+  produces an answer, and something has to be able to say no.
+- **When the frame stays open,** the round's `Next:` line is saved on the frame, so the next round on it starts there.
+
+## The brief
+
+Each brief is generated fresh and holds, in order:
+
+- **Your direction**: one standing instruction, kept in `project.json` as `direction`. Every round follows it ahead of
+  its own choice of next step until you change it.
+- **What you said in the terminal**: the latest five messages you sent a live round.
+- A warning when the last three rounds recorded nothing new, asking for a different angle.
+- The round's own closing note from last time, then the target, goal and rules.
+- The working rules for the round (settle one frame, or widen), and the gates with the commands a round may run itself.
+- What you decided, and the assumptions earlier rounds made in your place.
+- The current update, when another agent wrote it.
+- What is established. Then each claim a gate stopped, with what the gate said.
+- Titles only: other claims, the frames queued behind this one, and frames set aside.
+- The newest twenty ruled-out approaches.
+- Last, this round's frame.
+
+It asks for no reporting.
+
+## On the page
+
+- **Project brief** shows the project's question, live status and the dated current update. Use **Edit update** to
+  correct it, or **Copy reference for agent** and paste that into a chat with your correction.
+- **Live loop** has the goal, your direction, Start and Stop, the loop settings, the terminal and each round's saved
+  handoff.
+- **Research** leads with the gates, then four groups. **Established** holds what passed every gate. **Claimed, not
+  established** is ranked by gates passed, with a pill per gate. **Ruled out** keeps the reasons. **Open leads** are in
+  the order the loop takes them, with the next one marked and each one's rounds shown. Questions the agent needs you to
+  decide appear first with a box to answer in. Open a thread for each gate's output, its evidence and history.
+  **Pursue** puts a thread at the front; **Drop** removes it. You can add a thread yourself.
+- **Library** holds explanation pages that a chat agent writes when you ask it to explain something (see `AGENTS.md`),
+  and the project's note pages.
+- **More** holds the remaining pages, including Round notes, and **New project**.
+
+## Starting the loop from the page
+
+Off until `launchers.json` exists. `python3 scripts/hades.py --allow-launch` creates it for Claude Code; or copy
+`launchers.example.json` yourself and edit the command for your harness. Each entry is a named recipe (see "Changing the
+harness" in `AGENTS.md`). The file is read again at every launch.
+
+A project runs one loop at a time: Start is refused while one is alive, and Stop ends the loop and everything its round
+started. The loop works in `agent-work/<project>/<recipe>-1/`, where `loop.log` holds its output. A project can name a
+folder (`agent_files`) that a new working folder starts with a copy of. `loop.pid` there lets a restarted server find a
+loop it started before, so it can still be stopped.
+
+**Loop settings.** `"loop"` in `project.json` holds the settings every launch on the project uses, set from the page or
+with `POST /api/project {"project", "loop": {...}}`. The object replaces the stored one; unknown keys and nulls are
+dropped and a bad value is refused with its name. A launch takes each from its request, else `loop`, else the recipe's
+field of the same name, else the default.
 
 | Key | Values | Default |
 |---|---|---|
@@ -122,188 +219,128 @@ entry show the resolved `settings`.
 | `timeout_min` | minutes per round, 0 (no limit) to 1440 | 0: research rounds run as long as they need |
 | `reply_wait` | seconds a round stays open for your reply once you have spoken, 0 to 3600 | 120 |
 | `keep_background` | true leaves processes the agent started running after a round | false |
-| `style` | `focused` or `explore` | `focused` |
-| `agents` | workers Start launches at once, 1 to 5 (the launch request's `count` overrides it) | 1 |
 | `tools` | `recipe` uses the recipe's own allow-list; `wide` also allows web search, web fetch and subagents (Claude Code recipes only) | `recipe` |
 
 `wide` adds those tools to the allow-list by name. Permission checks stay on, so connectors and anything else not named
-stay refused. To go further, edit the recipe's `command` in `launchers.json`. A chat agent can change any of these for you
-when you ask: `AGENTS.md` shows it the `loop_settings` call.
+stay refused. To go further, edit the recipe's `command` in `launchers.json`.
 
-**Round styles.** A `focused` round does one piece of work and settles it. An `explore` round follows its nose: it goes
-where the target looks most surprising, takes a quick look at several things rather than proving one, may run things in
-parallel, and ends its handoff with a `Leads:` line per lead and the quickest test that would confirm or kill it. Leads
-(from any style) become open hypotheses in Research, where you can Pursue or Drop them. Each worker keeps the style it
-was launched with; a worker started by hand follows the project's `loop.style`.
+To run the loop yourself instead, from the folder the agent should work in:
 
-**Several workers.** With more than one worker from this server alive on a project, each brief says how many are working
-and which number this one is (by name), and starts it from a different open thread, priority threads first. A worker
-with no thread left for its number picks an angle the others are unlikely to take. They share no other coordination.
+    python3 /path/to/hades/scripts/loop.py my-project --agent claude-1 -- claude -p
 
-## What a harness can call
+Everything after `--` is your own harness command. Add `--interactive` before `--` for the live two-way view described
+below, `--max-iterations N`, `--max-hours H` or `--timeout-min M` for limits.
+
+## Watching and steering a round
+
+Open **Live loop**. The terminal follows the launched loop's printed output, including output before the first round
+event. The viewer reads the newest 64 KiB of the current launch about twice a second. The full log is saved in the
+loop's folder.
+
+A Claude Code loop started from a direct `claude -p` recipe runs each round as a live session. The terminal shows
+Claude's text, each tool call and the first lines of each tool result as they happen. Type in the box under the terminal
+and press Enter to message Claude while it works. Claude reads the message at its next step, in the same session, so you
+can redirect it without stopping the round. Shift+Enter adds a line.
+
+After you have sent a message, the round stays open for two minutes each time Claude finishes, so you can reply and
+continue the same conversation. With no reply, the round ends and the loop carries on. A round you never message ends as
+soon as Claude finishes. Each message restarts the round's time limit. A message sent between rounds reaches Claude when
+the next round starts. Every message is also kept for later rounds' briefs. A loop that stops reading for five seconds
+gets "not reading messages right now" rather than holding up the server.
+
+Messages can be sent only from the dashboard's own page, because they reach an agent that can run tools. To keep a
+recipe as a one-way batch run, add `"interactive": false` to it in `launchers.json`. Recipes for other programs,
+wrappers and Codex keep the one-way terminal.
+
+For a loop you started yourself, browsers with local file access offer **Follow a log file**. Select its growing text
+log. This selection lasts for the tab session.
+
+Select an earlier round for its saved handoff and recorded events. **Follow latest** resumes following new rounds.
+
+**Run details.** Click **ⓘ Run details** beside the terminal title to read the CLI arguments and exact text submitted on
+standard input. For a saved round, the same button appears beside its iteration details. These records describe input
+at the local CLI boundary. Provider-managed system instructions and context added inside the CLI are outside that
+boundary.
+
+Hades stores these records locally for dashboard-launched rounds. On macOS and Linux, wrappers that invoke a batch
+`claude` or `codex` by name through PATH are captured automatically. A wrapper that bypasses PATH, including one with an
+absolute executable path, can forward its final call through the capture helper on any platform. For a Python wrapper
+the call is `subprocess.run([sys.executable, os.environ["HADES_CAPTURE_CLI"], "--capture-cli", executable, *args], input=final_prompt_bytes)`.
+The wrapper's original command and input appear separately. Older or uninstrumented runs show which capture is missing.
+
+## The API
 
 | Call | What it does |
 |---|---|
-| `GET  /api/brief?project=X&agent=NAME` | Plain-text instructions plus current state |
-| `GET  /api/coordinator` | Plain-text guide for a chat agent that will run the server for you |
-| `POST /api/coordinate` | The coordinator's tools, without MCP |
-| `POST /api/launch`, `/api/stop` | Start and stop agents from a launch recipe |
-| `POST /api/events` | Report anything: activity, run, finding, question, item, task, tool, topic, proposal |
-| `POST /api/claim` | Take the oldest queued task |
-| `POST /api/slot` | Ask to start a round; honours the project's limit on agents at once |
-| `GET  /api/found?project=X` | What is confirmed and what is awaiting the verifier |
-| `GET  /api/runs?project=X&agent=NAME` | That agent's results with the verifier's decision |
-| `GET  /api/research?project=X&q=TEXT&area=AREA` | Current research threads, optionally filtered by text or area |
-| `POST /mcp` | The same as MCP tools |
+| `GET  /api/status?project=X` | Plain text: where the project stands. What an assistant reads first |
+| `GET  /api/brief?project=X&agent=NAME` | The plain-text brief for one round |
+| `GET  /api/project?project=X` | The project's config, and `hold` when it is paused |
+| `GET  /api/projects` | Every project with its launched loop and the launch recipes |
+| `GET  /api/events?project=X&after=N` | The log, 5,000 events at a time |
+| `GET  /api/research?project=X&q=TEXT&area=AREA` | Current research threads, optionally filtered |
+| `GET  /api/gates?project=X` | The claims waiting for a gate, and what to run on each |
+| `POST /api/frames` | Queue places to look, many at once |
+| `POST /api/events` | Report an `activity`, `item`, `question`, `research` or `topic` |
+| `POST /api/project` | Set `goal`, `summary`, `rules`, `target`, `direction`, `paused`, `loop`, or add a `section` |
+| `POST /api/new` | Create a project: `{"project", "goal", "target", "agent_files"}` |
+| `POST /api/launch`, `/api/stop` | Start and stop the project's loop |
 
 A research thread is a report with `type: "research"`, a short `text` claim, `kind` (`hypothesis`, `observation`,
 `experiment`, or `conclusion`) and `status` (`open`, `supported`, `contradicted`, `reproduced`, or `superseded`).
-Optional fields are `body` for reasoning, `conditions`, `next` for the next useful test, `area`, `scope` for the surface examined,
-`snapshot` for a commit, build or version, `run` for the producing run ID, and `evidence` as
-`[{"ref": "path, URL, or run id", "note": "what it shows"}]`, and `links` as
+Optional fields are `body` for reasoning, `conditions`, `next` for the next useful test, `area`, `scope` for the surface
+examined, `snapshot` for a commit, build or version, `evidence` as `[{"ref": "path or URL", "note": "what it shows"}]`,
+`artifact` (what the gates are run on), `score` (1 to 5, the rounds a frame is worth), and `links` as
 `[{"to": "another thread id", "relation": "supports"}]`. Other relations are `contradicts`, `depends on`,
 `variant of`, `same cause as`, and `follows from`. Reuse the returned `id` to update a thread. Unspecified evidence,
-links, context, conditions and next test survive updates. The Research page offers thread, area and activity views;
-each thread shows its attributed updates. `/api/research` returns the current state and a `history` array for each thread.
-Each thread also has `priority`, which only you set, from this machine:
-`{"project", "type": "research", "id", "priority": true, "source": "you"}` marks it and leaves everything else as it was.
-Marked threads come first in `/api/research` and in every brief; an agent's update never changes the mark.
-In the same way `{"project", "type": "research", "id", "status": "contradicted", "source": "you"}` drops a thread
-(or `"open"` reopens it) without touching its claim or evidence.
+links, context, conditions and next test survive updates. `/api/research` returns the current state and a `history`
+array for each thread, with where it stands: `state` (`established`, `failed`, `error`, `waiting` or `unchecked`), `at`
+(the gate it is stopped or waiting at), `standing` (gates passed in order), and as work `frame`, `attempts`, `budget`
+and `stalled`.
 
-## Steering an unattended loop
+`{"project", "type": "research", "id", "priority": true, "source": "you"}` marks a thread and leaves everything else as
+it was. Marked threads come first in `/api/research` and in every brief; an agent's update never changes the mark. In
+the same way `{"project", "type": "research", "id", "status": "contradicted", "source": "you"}` drops a thread (or
+`"open"` reopens it) without touching its claim or evidence. `"score": 4` and `"audited": true` are sent the same way.
 
-Every round starts fresh from the brief, so whatever should outlast a round goes there. Each brief leads with:
+To overrule an assumption: `{"project", "type": "question", "id", "answer": "...", "source": "you"}`.
 
-- **Your direction**: one standing instruction, kept in `project.json` as `direction` and set from this machine with
-  `POST /api/project {"project", "direction": "..."}` (up to 4,000 characters; `""` removes it). Every round follows it
-  ahead of its own choice of next step until you change it.
-- **What you said in the terminal**: each message you send a live worker is also saved to the log (an `activity` with
-  `source: "you"` and `harness: "terminal"`), and the latest five appear in every later brief.
-- **Research threads you marked**, ahead of the rest.
-
-**Lean brief.** With `"simple": true` (set from this machine with `POST /api/project {"project", "simple": true}`; the
-default project made by `server.py --dashboard` has it) the model does research and the harness keeps the record. The
-brief holds your direction and messages, the round's last closing note, target, goal and rules, the working rules for its round style, the
-current update, marked and open threads with their next test, and the newest 20 ruled-out approaches. It asks for no
-reporting. The one call it keeps is submitting a result to the independent check, when `metric.verify` is set.
-
-From each lean round's note, the text after its last `Handoff:` becomes the `now` page's `Current update`. Each
-`Results:` line becomes a research thread (kind `conclusion`, status `supported`, `known` from a trailing `[known: ...]`
-or `[new]`, `run` when it names an existing run such as "run r12"). Each `Ruled out:` line becomes a contradicted
-observation. Derived threads carry `origin: "handoff"`, and repeats of an existing thread are skipped. Each
-`Decision needed:` line becomes a question for you. It appears first on the Research page with a box to answer in, and
-later briefs give the model your answer as decided and list unanswered ones so it does not ask twice.
-
-**Checker files.** `"protected": ["score.py", "kernel/**"]` in `project.json` (set by hand only, like the scoring command)
-lists glob patterns in each agent's folder. The lean brief tells the model not to edit them, and the loop hashes them
-around every round and reports a change as `Checker changed during round N: ...`.
-
-## On the page
-
-- The **Project brief** opens first for OpenSSH research. A note section with the ID `now` uses this layout. It shows the project question, live status, and dated update with a link to its records. The OpenSSH workspace instructions tell agents to maintain the same update as the work or your direction changes. Other projects open to Overview or, during setup, Understand.
-- **Research** shows a list of claims. Open a thread for its evidence, related claims and history.
-- **Experiments** shows outcomes first. Open an experiment for its controls and evidence. Projects without an experiments section show Runs.
-- **More** holds the remaining project pages, including sources, notes and history. On a note page, use **Add note** or **Edit**. Note bodies support Markdown.
-- To correct a saved note through Codex or Claude, open **Edit update** on the brief or **Edit** on another note page. Choose **Copy reference for agent** and paste it into the chat with your correction. The reference identifies the existing note so the agent can update it in place.
-- The header has a project switcher, page search, notifications, and a light or dark toggle.
+A project can have extra pages. `POST /api/project {"project", "section": {"id", "title", "view"}}` adds one; `view` is
+`note` (one block of prose per key) or `table` (one row per key, with `columns`). Fill it with `item` reports:
+`{"project", "type": "item", "section", "key", "body"}` or `"data": {"<column>": value}`.
 
 ## Windows
 
-The server, the page and the Start button work on Windows with Python 3 alone: run `py -3 scripts\hades.py`. Workers start
-in a process group of their own; Stop ends a worker's whole process tree with `taskkill`, and the loop ends what its rounds
-started. A bare program name in a recipe (`claude`) is looked up on PATH first, so `claude.cmd` shims start without a shell.
-After a server restart, a worker from before is recognised by its recorded process id and a running Python process, since
-Windows does not show other processes' command lines. Scoring commands in `project.json` are split with POSIX rules on
-every platform, so quote a Windows path that contains spaces or backslashes, for example `'C:\Python\python.exe' score.py`.
-
-## Running in a VM
-
-Copy this folder in and run `python3 scripts/hades.py --no-open`. Agents on the same machine reach it at `127.0.0.1:8765` with no token.
-
-To take reports from other machines:
-
-    PROJECT_VIEW_TOKEN=<secret> PROJECT_VIEW_VERIFIER_TOKEN=<another> python3 server.py --host 0.0.0.0
-
-Agents then set `PROJECT_VIEW_URL` and `PROJECT_VIEW_TOKEN`. You still need your harness installed and signed in on
-each machine that runs agents. Hades only starts agents if you create `launchers.json`.
-
-## Trust
-
-- Requests from the server's own machine are fully trusted. Remote writers need the token.
-- Only the verifier may post verdicts. The scoring command lives in `projects/<name>/project.json` and can only be set by
-  hand or by you approving a proposal on the page.
-- Approving a proposal saves an agent-written script that the verifier will run. Read it first.
-- An agent with a shell on the server's machine could bypass all of this. For results you need to trust, run the server
-  and verifier somewhere the agents cannot reach.
+The server, the page and the Start button work on Windows with Python 3 alone: run `py -3 scripts\hades.py`. The loop
+starts in a process group of its own; Stop ends its whole process tree with `taskkill`, and the loop ends what its
+rounds started. A bare program name in a recipe (`claude`) is looked up on PATH first, so `claude.cmd` shims start
+without a shell. After a server restart, a loop from before is recognised by its recorded process id and a running
+Python process, since Windows does not show other processes' command lines.
 
 ## Files
 
 | File | What it is |
 |---|---|
-| `scripts/hades.py` | The front door: checks the install, then runs the server and the verifier together |
-| `server.py` | The server: storage, briefs, tasks, slots, setup and approval |
+| `scripts/hades.py` | The front door: checks the install, then starts the server |
+| `server.py` | The server: the log, the brief, the handoff record, launching |
 | `index.html` | The whole page |
-| `scripts/verifier.py` | Re-scores results with each project's scoring command |
-| `scripts/loop.py` | Runs any harness in rounds; this one file is all an agent machine needs |
-| `scripts/emit.py` | Report one event from a shell script |
-| `demo/run.py`, `demo/` | Demo projects with simulated agents and real scoring |
-| `toys/` | Ready-made targets. `tinyvm` (the `practice` project) and `blackbox` have hidden answer keys; `stdlib` is real code with none. **The answer keys are spoilers: keep them away from agents.** |
+| `scripts/loop.py` | Runs a harness in rounds |
+| `launchers.json` | Your launch recipes. Not in version control |
 | `projects/` | Your projects' data. Not in version control |
+| `agent-work/` | The folders loops work in. Not in version control |
 
 ## Known limits
 
-- The page loads a project's whole log. Measured on one machine at 200,000 events (50 MB): it loads in under a second,
-  every server call answers in under 0.3 s, and an agent's brief stays near 35 kB. Well past that, or over a slow
-  network, it will need paging on the server.
-- The verifier scores up to 8 results at once (about 240 a second on the practice project). A scoring command that
-  cannot run alongside a copy of itself needs `"workers": 1` under `metric` in its `project.json`.
-- Measured coverage adds up counts the scoring command reports. On the `stdlib` target that is inputs tried, not code
-  reached, so "covered" there is easy to reach and says little.
-- Turn-taking under an agent limit is rough: a waiting agent checks every 15 seconds.
-- Desktop notifications, remote tokens and MCP clients are written but lightly tested.
-
-## Displaying completed verifier checks
-
-On the Experiments table, a green badge means the verifier confirmed the result on the stated build and configuration for that exact experiment revision. Expand **Verifier record** to inspect the evidence. A check that ran without demonstrating the result shows **Not demonstrated**. A check that could not establish an outcome shows **Check inconclusive**. Agent reports and ordinary run scores cannot award these badges.
-
-Set `HADES_EVIDENCE_DIR` in the dashboard process environment to an absolute directory holding completed reports. Give the dashboard read access. Only the verifier or its operator should have write access. The directory permissions establish the identity of the publisher. Agents sharing the publisher’s OS credentials would share its authority.
-
-The dashboard refreshes `<project-id>.json` in that directory. Publish one complete snapshot per project, replacing the file atomically. Use the experiment key and the full revision shown under **Details**. Include one record per experiment. For example, a completed check might be recorded as follows.
-
-```json
-{
-  "project": "sample",
-  "checks": [{
-    "experiment": "Configuration review",
-    "revision": "131a0a12320e4a51be75211c26fd2a09",
-    "outcome": "inconclusive",
-    "build": "release 3.1",
-    "configuration": "standard image",
-    "evidence": "https://records.example.org/checks/42"
-  }]
-}
-```
-
-The outcome values are `confirmed`, `not-demonstrated` and `inconclusive`. The evidence field holds a URL or an artifact reference. Editing an experiment gives it a new revision and retires its badge. An earlier record in the snapshot stays readable under that experiment. Missing or invalid records cannot produce a confirmation.
-
-## Watching iterations
-
-Open **Live loop** on localhost. For a worker started by Hades, the terminal follows its printed stdout and stderr automatically, including output before the first round event. The viewer reads the newest 64 KiB of the current launch about twice a second. Scroll up to read earlier lines in that window. The full local launch log is saved in the worker’s folder.
-
-A Claude Code worker started by Hades from a direct `claude -p` recipe runs each round as a live session. The terminal shows Claude's text, each tool call and the first lines of each tool result as they happen. Type in the box under the terminal and press Enter to message Claude while it works. Claude reads the message at its next step, in the same session, so you can redirect it without stopping the round. Shift+Enter adds a line.
-
-After you have sent a message, the round stays open for two minutes each time Claude finishes, so you can reply and continue the same conversation. With no reply, the round ends and the loop carries on. A round you never message ends as soon as Claude finishes. Each message restarts the round's time limit. A message sent between rounds reaches Claude when the next round starts.
-Every message is also kept for later rounds; see Steering an unattended loop. Choose the model in the start form; it applies
-to that launch only. A worker that stops reading for five
-seconds gets "not reading messages right now" rather than holding up the server. The round note holds Claude's finished replies, and Run details lists every message with the command it was sent to.
-
-Messages can be sent only from the dashboard open on its own machine, because they reach an agent that can run tools. To keep a recipe as a one-way batch run, add `"interactive": false` to it in `launchers.json`. Recipes for other programs, wrappers and Codex keep the one-way terminal. From your own terminal, add `--interactive` before `--` in a `loop.py` command to get the same live view; each line you type is sent to Claude.
-
-For a separately started worker, browsers with local file access offer **Follow a log file**. Select its growing text log from a disk or share visible to the browser. This selection lasts for the tab session. Programs control when they flush output.
-
-The runner asks for a final handoff and saves the last 6,000 characters of stdout once per round unless round notes are disabled. Terminal viewing requires no progress posts from the model. Select an earlier round for its saved handoff and recorded events. **Follow latest** resumes following new rounds.
-
-Click **ⓘ Run details** beside the terminal title to read the CLI arguments and exact text submitted on standard input. For a saved round, the same button appears beside its iteration details. Prompt text passed as an argument is visible in the command. These records describe input at the local CLI boundary. Provider-managed system instructions and context added inside the CLI are outside that boundary.
-
-Hades stores these records locally for dashboard-launched rounds and serves them on localhost. The live terminal stays visible when you close the dialog. On macOS and Linux, wrappers that invoke a batch `claude` or `codex` by name through PATH are captured automatically. A wrapper that bypasses PATH, including one with an absolute executable path, can forward its final call through the capture helper on any platform. For a Python wrapper the call is `subprocess.run([sys.executable, os.environ["HADES_CAPTURE_CLI"], "--capture-cli", executable, *args], input=final_prompt_bytes)`. The wrapper’s original command and input appear separately. Older or uninstrumented runs show which capture is missing.
+- The page loads a project's whole log.
+- An agent with a shell on this machine can write to the record as anyone, including as you or as a gate, and can edit
+  a gate or a locked file. Nothing here is a security boundary between the agent and the record. For a result that
+  matters, run the gates again yourself, then mark it audited.
+- A verdict and your audit are about an artifact by name. If the file's contents change afterwards, nothing notices
+  until the claim is made again.
+- If `project.json` stops being valid JSON, the loop holds and says why, and the server refuses to write to it. That is
+  the one thing it waits for.
+- A refuter is a model judging a model. Its refutation has to be concrete to count, but a claim it lets through has
+  only failed to be killed.
+- There is no pass that scores a queue for you, no running of several attempts side by side, and no tracking of what
+  happened to a result after you reported it.
+- A log written by an earlier version may hold kinds of report that no longer exist (runs, verdicts, findings, tasks).
+  They stay in `events.jsonl` and are skipped when it is loaded.

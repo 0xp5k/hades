@@ -1,31 +1,25 @@
 #!/usr/bin/env python3
-"""The front door. One command checks this install and runs everything a single machine needs.
+"""The front door. One command checks this install and starts the page.
 
   python3 scripts/hades.py          check the install, then open the page (a first run starts with one empty project)
   python3 scripts/hades.py check    only check that this install works: a few seconds, no model needed, nothing left behind
-  python3 scripts/hades.py new <target> [name]   add a ready-made project from toys/: "tinyvm" (17 planted defects),
-                            or "stdlib" (25 real parsers from Python's standard library, no answer key)
 
 Options for the first form:
   --no-open        do not open the page in a browser
   --skip-check     start without checking first
-  --allow-launch   let the page and a coordinator start Claude Code agents on this machine (writes launchers.json
-                   from launchers.example.json). Without it you are asked once, if a terminal is attached.
-  --host 0.0.0.0   be reachable from other machines; requires PROJECT_VIEW_TOKEN, as with server.py
+  --allow-launch   let the page start Claude Code on this machine (writes launchers.json from launchers.example.json).
+                   Without it you are asked once, if a terminal is attached.
 
-On the page, say what to research and press Start. To try a ready-made target with an answer key instead:
-  python3 scripts/hades.py new tinyvm practice      then score it with:  python3 toys/tinyvm/answer_key.py score practice
+On the page, say what to research and press Start.
 """
 import json
 import os
-import shlex
 import shutil
 import socket
 import subprocess
 import sys
 import tempfile
 import threading
-import time
 import urllib.error
 import urllib.request
 import webbrowser
@@ -37,42 +31,15 @@ if sys.version_info < (3, 8):
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import server  # noqa: E402
-import verifier  # noqa: E402
 
-PRACTICE = "practice"
-TOY = server.ROOT / "toys" / "tinyvm"
-HARNESSES = {"claude": "Claude Code", "codex": "Codex CLI", "omp": "OhMyPi"}
-
-
-def make(name, toy):
-    """Create the project `name` from toys/<toy>/project.json, if it is not there yet. Returns True if it was created.
-    The template is an ordinary project.json plus "seed" (the files every agent starts with) and "entries" (its map)."""
-    home, source = server.PROJECTS / name, server.ROOT / "toys" / toy
-    if (home / "project.json").exists():
-        return False
-    cfg = json.loads((source / "project.json").read_text())
-    seed = home / "agent-files"  # agents get these files and nothing else from toys/
-    seed.mkdir(parents=True, exist_ok=True)
-    for file in cfg.pop("seed", []):
-        shutil.copy(source / file, seed)
-    entries = cfg.pop("entries", [])
-    cfg["agent_files"] = str(seed)
-    # The scoring script stays in toys/, next to the copy of the target it replays against.
-    cfg["metric"]["verify"] = f"{shlex.quote(sys.executable)} {shlex.quote(str(source / 'score.py'))}"
-    (home / "project.json").write_text(json.dumps(cfg, indent=2) + "\n")
-    for entry in entries:
-        server.ingest({"project": name, "type": "item", "text": "", **entry})
-    return True
-
-
-def practice():
-    return make(PRACTICE, "tinyvm")
+PROJECT = "self-check"
+HARNESSES = {"claude": "Claude Code", "codex": "Codex CLI"}
 
 
 def check():
     """Start a throwaway server on a spare port with an empty data folder, and exercise every part through it."""
     tmp = Path(tempfile.mkdtemp(prefix="hades-check-"))
-    server.PROJECTS = verifier.PROJECTS = tmp / "projects"
+    server.PROJECTS = tmp / "projects"
     server.LAUNCH_FILE = tmp / "launchers.json"
     httpd = ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
     server.PORT = httpd.server_address[1]
@@ -86,8 +53,7 @@ def check():
                 raw = r.read().decode()
         except urllib.error.HTTPError as e:
             raise RuntimeError(f"{path} answered {e.code}: {e.read().decode()[:200]}") from None
-        text = path == "/" or path.startswith("/api/brief") or path == "/api/coordinator"  # the page and the two plain-text guides
-        return raw if text else json.loads(raw)
+        return raw if path == "/" or path.startswith("/api/brief") else json.loads(raw)  # the page and the brief are plain text
 
     def need(condition, problem):
         if not condition:
@@ -97,103 +63,106 @@ def check():
         need("<title>Hades</title>" in http("/"), "the page did not come back")
 
     def project():
-        need(practice(), "could not create the practice project")
-        listed = {p["id"]: p for p in http("/api/projects")}
-        need(PRACTICE in listed, "the practice project is not listed")
-        parts = sum(1 for e in http(f"/api/events?project={PRACTICE}")["events"] if e["type"] == "item")
-        need(parts > 30, f"expected the map of the machine, got {parts} entries")
-        return f"{parts} parts on its map"
+        made = http("/api/new", {"project": PROJECT, "goal": "Find where the parser and its specification disagree."})
+        need(made.get("goal", "").startswith("Find where"), f"unexpected answer: {made}")
+        need(any(p["id"] == PROJECT for p in http("/api/projects")), "the new project is not listed")
 
     def report():
-        event = http("/api/events", {"project": PRACTICE, "type": "activity", "text": "Self-check says hello", "agent": "self-check"})
+        event = http("/api/events", {"project": PROJECT, "type": "activity", "text": "Self-check says hello", "agent": "self-check"})
         need(event.get("type") == "activity", f"unexpected answer: {event}")
         try:
-            http("/api/events", {"project": PRACTICE, "type": "not-a-type", "text": "x"})
+            http("/api/events", {"project": PROJECT, "type": "not-a-type", "text": "x"})
         except RuntimeError as e:
             need("400" in str(e), f"a malformed report should be refused with 400, got: {e}")
         else:
             raise RuntimeError("a malformed report was accepted")
 
-    def task():
-        http("/api/events", {"project": PRACTICE, "type": "task", "text": "Self-check task", "status": "queued"})
-        first = http("/api/claim", {"project": PRACTICE, "agent": "self-check"})
-        need(first and first.get("text") == "Self-check task" and first.get("status") == "running", f"the task was not handed over: {first}")
-        need(http("/api/claim", {"project": PRACTICE, "agent": "someone-else"}) is None, "the same task was handed out twice")
-
     def brief():
-        text = http(f"/api/brief?project={PRACTICE}&agent=self-check")
-        need("tinyvm.py" in text and "curl" in text, "the brief is missing the goal or the commands to report with")
+        http("/api/project", {"project": PROJECT, "direction": "Start with the length fields."})
+        text = http(f"/api/brief?project={PROJECT}&agent=self-check")
+        need("Find where the parser" in text and "Start with the length fields." in text, "the brief is missing the goal or the direction")
         return f"{len(text.splitlines())} lines"
 
-    def scoring():
-        sys.path.insert(0, str(TOY))
-        import tinyvm
-        halt = next(code for code, handler in tinyvm.OPS.items() if handler.__name__ == "op_halt")
-        crash, clean = b"TVM1\x01\x01\x09ab", b"TVM1\x00" + bytes([halt])
-        http("/api/events", {"project": PRACTICE, "type": "run", "text": "A program that really crashes", "agent": "self-check", "artifact": {"program_hex": crash.hex()}})
-        http("/api/events", {"project": PRACTICE, "type": "run", "text": "A claimed crash that is not one", "agent": "self-check", "artifact": {"program_hex": clean.hex()}})
-        need(verifier.check_once(url)[0] == 2, "the verifier did not score both runs")
-        runs = {r["text"]: r for r in http(f"/api/runs?project={PRACTICE}&agent=self-check")}
-        real, fake = runs["A program that really crashes"], runs["A claimed crash that is not one"]
-        need(real["state"] == "confirmed" and real["detail"] == "IndexError in read_constants", f"the real crash was not confirmed: {real}")
-        need(fake["state"] == "not confirmed", f"the false claim was not rejected: {fake}")
-        need("read_constants" in (real.get("covers") or {}), "the verifier did not report what the run reached")
-        return "real crash confirmed, false claim rejected"
-
     def loop():
-        stand_in = [sys.executable, "-c", "import sys; print('Stand-in harness read a brief of', len(sys.stdin.read()), 'characters')"]
-        done = subprocess.run([sys.executable, str(server.ROOT / "scripts" / "loop.py"), PRACTICE, "--agent", "self-check-loop", "--max-iterations", "1", "--pause", "0", "--"] + stand_in,
+        stand_in = [sys.executable, "-c", "import sys; sys.stdin.read(); print('Handoff: Stand-in round.\\nResults: The header length is trusted [new]\\n"
+                    "Ruled out: The checksum is not the cause\\nDecision needed: May I fuzz the live service?\\nNext: Read the parser')"]
+        done = subprocess.run([sys.executable, str(server.ROOT / "scripts" / "loop.py"), PROJECT, "--agent", "self-check", "--max-iterations", "1", "--pause", "0", "--"] + stand_in,
                               env={**os.environ, "PROJECT_VIEW_URL": url}, cwd=tmp, capture_output=True, text=True, timeout=60)
         need(done.returncode == 0, f"loop.py exited with {done.returncode}: {(done.stdout + done.stderr)[-300:]}")
-        notes = [e for e in http(f"/api/events?project={PRACTICE}")["events"] if e.get("section") == "round-notes" and "Stand-in harness" in e.get("body", "")]
-        need(notes, "the round's output did not reach the Round notes page")
+        events = http(f"/api/events?project={PROJECT}")["events"]
+        need(any(e.get("section") == "round-notes" and "Stand-in round" in e.get("body", "") for e in events), "the round's output did not reach the Round notes page")
+        need(any(e.get("section") == "now" and e.get("key") == "Current update" for e in events), "the handoff did not become the current update")
         return "one round with a stand-in harness"
 
+    def memory():
+        threads = {n["text"]: n for n in http(f"/api/research?project={PROJECT}")}
+        need(threads.get("The header length is trusted", {}).get("status") == "supported", f"the result was not kept as a thread: {list(threads)}")
+        need(threads.get("The checksum is not the cause", {}).get("status") == "contradicted", "the ruled-out approach was not kept")
+        asked = [e for e in http(f"/api/events?project={PROJECT}")["events"] if e["type"] == "question"]
+        need(asked and "fuzz the live service" in asked[0]["text"], "the decision was not kept as a question")
+        http("/api/events", {"project": PROJECT, "type": "question", "id": asked[0]["id"], "answer": "No, only the local copy.", "source": "you"})
+        text = http(f"/api/brief?project={PROJECT}&agent=self-check")
+        need("Stand-in round" in text and "The checksum is not the cause" in text and "only the local copy" in text,
+             "the next brief is missing the last handoff, the ruled-out approach or the person's answer")
+        return "results, dead ends and decisions reach the next brief"
+
     def research():
-        first = http("/api/events", {"project": PRACTICE, "type": "research", "agent": "self-check", "kind": "hypothesis",
+        first = http("/api/events", {"project": PROJECT, "type": "research", "agent": "self-check", "kind": "hypothesis",
                                       "status": "open", "text": "A boundary may be wrong", "next": "Compare the guarded paths",
-                                      "scope": "tinyvm boundary", "snapshot": "practice-v1",
-                                      "evidence": [{"ref": "tinyvm.py", "note": "Candidate source"}]})
-        second = http("/api/events", {"project": PRACTICE, "type": "research", "agent": "self-check", "kind": "observation",
+                                      "scope": "parser boundary", "snapshot": "v1",
+                                      "evidence": [{"ref": "parser.py", "note": "Candidate source"}]})
+        second = http("/api/events", {"project": PROJECT, "type": "research", "agent": "self-check", "kind": "observation",
                                        "status": "supported", "text": "The paths differ", "links": [{"to": first["id"], "relation": "supports"}]})
-        http("/api/events", {"project": PRACTICE, "type": "research", "id": first["id"], "agent": "self-check",
+        http("/api/events", {"project": PROJECT, "type": "research", "id": first["id"], "agent": "self-check",
                              "kind": "hypothesis", "status": "supported", "text": "A boundary may be wrong"})
-        nodes = {n["id"]: n for n in http(f"/api/research?project={PRACTICE}")}
-        need(nodes[first["id"]]["status"] == "supported" and nodes[first["id"]]["evidence"][0]["ref"] == "tinyvm.py",
+        nodes = {n["id"]: n for n in http(f"/api/research?project={PROJECT}")}
+        need(nodes[first["id"]]["status"] == "supported" and nodes[first["id"]]["evidence"][0]["ref"] == "parser.py",
              "a research update lost its evidence")
-        need(nodes[first["id"]]["scope"] == "tinyvm boundary" and nodes[first["id"]]["snapshot"] == "practice-v1",
+        need(nodes[first["id"]]["scope"] == "parser boundary" and nodes[first["id"]]["snapshot"] == "v1",
              "a research update lost its scope or snapshot")
         need(len(nodes[first["id"]]["history"]) == 2 and nodes[first["id"]]["history"][0]["status"] == "open"
              and nodes[first["id"]]["history"][1]["status"] == "supported", "research history lost its changes")
         need(nodes[second["id"]]["links"][0]["to"] == first["id"], "research links were lost")
-        need("A boundary may be wrong" in http(f"/api/brief?project={PRACTICE}&agent=self-check"), "the brief omitted research")
+        need("A boundary may be wrong" in http(f"/api/brief?project={PROJECT}&agent=self-check"), "the brief omitted research")
         return "linked research survives updates and reaches the brief"
 
-    def mcp():
-        hello = http("/mcp", {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}})
-        need(hello["result"]["serverInfo"]["name"] == "hades", f"unexpected answer: {hello}")
-        tools = [t["name"] for t in http("/mcp", {"jsonrpc": "2.0", "id": 2, "method": "tools/list"})["result"]["tools"]]
-        need("report" in tools and "start_agents" in tools, f"tools are missing: {tools}")
-        got = http("/mcp", {"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "get_project", "arguments": {"project": PRACTICE}}})
-        need("tinyvm" in got["result"]["content"][0]["text"], "get_project did not return the project")
-        return f"{len(tools)} tools"
+    def gating():
+        home = server.PROJECTS / "self-check-gated"
+        home.mkdir(parents=True)
+        (home / "replay.py").write_text("import sys\nfrom pathlib import Path\nfound = Path(sys.argv[1]).read_text()\n"
+                                        "print('read', sys.argv[1])\nsys.exit(0 if 'overflow' in found else 1)\n")
+        (home / "scope.md").write_text("Only faults reachable from a file the user opens.\n")
+        (home / "project.json").write_text(json.dumps({"goal": "Crash the parser", "artifact": "the path of a file holding the crashing input",
+            "lock": ["scope.md", "replay.py"], "gates": [{"name": "reproduces", "command": [sys.executable, "{project}/replay.py"]},
+                                                         {"name": "not known", "refute": "Look for an earlier report of this fault. Cite it if you find one."}]}))
+        text = http("/api/brief?project=self-check-gated&agent=self-check")
+        need("PASSES THE GATES, in this order: reproduces, not known" in text and "[check: <artifact>]" in text, "the brief does not explain the gates")
+        # one stand-in for both kinds of round: a research round claims three results and a lead; a refuter round kills one claim
+        (tmp / "standin.py").write_text("import sys\nbrief = sys.stdin.read()\nif 'Verdict:' in brief:\n"
+            "    print('Verdict: refuted - reported upstream as issue 12' if 'footer' in brief else 'Verdict: stands - searched the tracker and the changelog')\n"
+            "    sys.exit(0)\nfor name, body in (('good.txt', 'overflow'), ('also.txt', 'overflow'), ('bad.txt', 'nothing')):\n    open(name, 'w').write(body)\n"
+            "print('Handoff: Three candidates.\\nResults:\\n- The length field overflows [new] [check: good.txt]\\n- The footer overflows [check: also.txt]\\n"
+            "- The trailer overflows [check: bad.txt]\\n- The header is odd\\nLeads:\\n- The tokenizer on nested brackets: time a deep input [score: 5]\\nNext: x')\n")
+        done = subprocess.run([sys.executable, str(server.ROOT / "scripts" / "loop.py"), "self-check-gated", "--agent", "self-check", "--max-iterations", "1", "--pause", "0",
+                               "--", sys.executable, str(tmp / "standin.py")],
+                              env={**os.environ, "PROJECT_VIEW_URL": url}, cwd=tmp, capture_output=True, text=True, timeout=90)
+        need(done.returncode == 0, f"loop.py exited with {done.returncode}: {(done.stdout + done.stderr)[-300:]}")
+        now = {n["text"]: n for n in http("/api/research?project=self-check-gated")}
+        stand = {text: (n["state"], n["at"], n["standing"]) for text, n in now.items() if n["status"] != "open"}
+        need(stand == {"The length field overflows": ("established", None, 2), "The footer overflows": ("failed", "not known", 1),
+                       "The trailer overflows": ("failed", "reproduces", 0), "The header is odd": ("unchecked", "reproduces", 0)}, f"unexpected standing: {stand}")
+        text = http("/api/brief?project=self-check-gated&agent=self-check")
+        frame, later = text.partition("THIS ROUND'S FRAME")[2], text.partition("ALSO QUEUED")[2].partition("RULED OUT")[0]
+        need("ESTABLISHED" in text and "issue 12" in text and f'[{now["The footer overflows"]["id"]}]' in frame, "the next brief does not lead with the claim nearest to established")
+        need(later.index("tokenizer") < later.index("trailer"), "the queue is not ordered by standing, then score")
+        (home / "scope.md").write_text("Only faults reachable over the network.\n")  # the person changes the question
+        state = {n["text"]: n["state"] for n in http("/api/research?project=self-check-gated")}
+        need(state["The length field overflows"] == "waiting", "a verdict outlived a change to the locked question")
+        return "two gates in order, a refuter round, the queue, and a stale verdict"
 
-    def coordinator():
-        need("list_projects" in http("/api/coordinator"), "the coordinator guide is missing its tools")
-        listed = http("/api/coordinate", {"tool": "list_projects", "args": {}})["result"]
-        need(any(p["project"] == PRACTICE for p in listed), "list_projects did not include the practice project")
-        status = http("/api/coordinate", {"tool": "project_status", "args": {"project": PRACTICE}})["result"]
-        need(status, "project_status returned nothing")
-
-    def setup():
-        made = http("/api/new", {"project": "self-check-new", "target": "A folder of files I have not read yet."})
-        need(made.get("phase") == "survey", f"a new project should start in setup: {made}")
-        need("SET UP" in http("/api/brief?project=self-check-new&agent=self-check"), "a new project's brief should ask for a survey")
-
-    steps = [("The page loads", page), ("The practice project is created", project), ("A report is accepted and a malformed one refused", report),
-             ("A queued task goes to exactly one agent", task), ("The brief is written", brief), ("The verifier re-scores results", scoring),
-             ("The loop runs a round", loop), ("Research threads stay linked", research), ("The MCP endpoint answers", mcp), ("The coordinator guide and tools answer", coordinator),
-             ("A new project starts in setup", setup)]
+    steps = [("The page loads", page), ("A project is created", project), ("A report is accepted and a malformed one refused", report),
+             ("The brief is written", brief), ("The loop runs a round", loop), ("The round's handoff becomes the record", memory),
+             ("Research threads stay linked", research), ("The gates decide what is established", gating)]
     print(f"Checking this install (Python {sys.version.split()[0]}) ...")
     failed = 0
     for label, step in steps:
@@ -243,22 +212,8 @@ def offer_launch(yes):
 def main(argv):
     if argv[:1] == ["check"]:
         sys.exit(0 if check() else 1)
-    if argv[:1] == ["new"]:
-        toys = sorted(d.name for d in (server.ROOT / "toys").iterdir() if (d / "project.json").exists())
-        if len(argv) not in (2, 3) or argv[1] not in toys:
-            sys.exit("usage: python3 scripts/hades.py new <target> [project-name]     targets: " + ", ".join(toys))
-        name = argv[2] if len(argv) == 3 else argv[1]
-        try:
-            created = make(server.check_name(name), argv[1])
-        except ValueError as e:
-            sys.exit(str(e))
-        sys.exit(0 if created else f"A project named {name} already exists.")
-    unknown = [a for i, a in enumerate(argv) if a not in ("--no-open", "--skip-check", "--allow-launch", "--host") and not (i and argv[i - 1] == "--host")]
-    if unknown or (argv[-1:] == ["--host"]):
+    if [a for a in argv if a not in ("--no-open", "--skip-check", "--allow-launch")]:
         sys.exit(__doc__.strip())
-    host = argv[argv.index("--host") + 1] if "--host" in argv else "127.0.0.1"
-    if host not in server.LOCAL and not server.TOKEN:
-        sys.exit("Refusing to listen beyond this machine without a token. Set PROJECT_VIEW_TOKEN first.")
     here = f"http://127.0.0.1:{server.PORT}"
     if listening(server.PORT):
         sys.exit(f"Something is already listening on port {server.PORT}. If that is Hades, it is at {here} .\n"
@@ -270,16 +225,11 @@ def main(argv):
     if not server.project_ids():
         server.starter()
     offer_launch("--allow-launch" in argv)
-    print(f"Open your project dashboard at {here}/")
-    if PRACTICE in server.project_ids():
-        print(f"  Try the practice project in another terminal: sh run-live.sh {PRACTICE} 3")
-        print(f"  See how it did: python3 toys/tinyvm/answer_key.py score {PRACTICE}")
-    print("\nThe verifier runs in this process too. Ctrl-C stops both.\n")
-    threading.Thread(target=verifier.loop, args=(here,), daemon=True).start()
+    print(f"Open your project dashboard at {here}/\nCtrl-C stops it.\n")
     if "--no-open" not in argv:
         threading.Timer(1, lambda: webbrowser.open(f"{here}/")).start()
     try:
-        server.serve(host)
+        server.serve()
     except KeyboardInterrupt:
         print("\nStopped.")
 

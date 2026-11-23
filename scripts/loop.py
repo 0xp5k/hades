@@ -1,29 +1,32 @@
 #!/usr/bin/env python3
-"""Run any harness against a project, nonstop. This one file is all a VM needs besides the harness.
+"""Run any harness against a project, round after round. The Start button on the page runs this; so can you.
 
-  python3 scripts/loop.py my-project --agent vm-1/claude -- claude -p
-  python3 scripts/loop.py my-project --agent vm-2/other  -- my-harness --prompt-file {brief_file}
+  python3 scripts/loop.py my-project --agent claude-1 -- claude -p
+  python3 scripts/loop.py my-project --agent other-1  -- my-harness --prompt-file {brief_file}
 
 Each iteration starts the harness fresh, with the project's current brief as its prompt:
-  1. Stop if a limit is reached or a file named STOP exists here. Wait while the project is on hold (paused, or waiting on the person).
+  1. Stop if a limit is reached or a file named STOP exists here. Wait while the person has the project paused.
   2. Fetch the brief from the server (instructions plus where things stand right now).
   3. Run your command. The brief is sent on its standard input. In the arguments, {brief_file} is
      replaced with the path of a file holding it, and {brief} with the text itself.
-  4. Save what the harness printed to the project's "Round notes" page, report how the round ended, then go again.
+  4. Save what the harness printed to the project's "Round notes" page.
+  5. If the project has gates, run them in order on every result the round claimed with an artifact, and record each
+     verdict. A gate is a command (exit code 0 passes) or a refuter: this same harness, started fresh, shown only the
+     claim and asked to kill it. Gates run here, in this folder, after the round's harness has ended: the agent does
+     not report its own verdict.
+  6. Report how the round ended, then go again.
 
 With --interactive and a direct "claude -p" command, a round is a live conversation. The terminal shows Claude's
 text, tool calls and tool results as they happen, and each line typed on this program's standard input is sent to
 Claude as a message from the person. Claude receives it at its next step, in the same session.
 
 Everything after "--" is your harness command, exactly as you would type it. The harness needs to be
-allowed to make HTTP requests to the server and to do the project's work without asking; how you grant
-that is specific to the harness.
+allowed to do the project's work without asking; how you grant that is specific to the harness.
 
-Environment: PROJECT_VIEW_URL (default http://127.0.0.1:8765), PROJECT_VIEW_TOKEN (from another machine).
+Environment: PROJECT_VIEW_URL (default http://127.0.0.1:8765).
 """
 import argparse
 import codecs
-import hashlib
 import socket
 import shlex
 import shutil
@@ -33,6 +36,7 @@ import json
 import locale
 import os
 import queue
+import re
 import select
 import subprocess
 import sys
@@ -43,17 +47,14 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
-from pathlib import Path, PurePath
+from pathlib import Path
 
 URL = os.environ.get("PROJECT_VIEW_URL", "http://127.0.0.1:8765").rstrip("/")
 
 
 def call(path, body=None):
-    headers = {"Content-Type": "application/json"}
-    if os.environ.get("PROJECT_VIEW_TOKEN"):
-        headers["Authorization"] = "Bearer " + os.environ["PROJECT_VIEW_TOKEN"]
     data = json.dumps(body).encode() if body is not None else None
-    with urllib.request.urlopen(urllib.request.Request(URL + path, data, headers), timeout=15) as r:
+    with urllib.request.urlopen(urllib.request.Request(URL + path, data, {"Content-Type": "application/json"}), timeout=15) as r:
         return r.read().decode()
 
 
@@ -205,9 +206,9 @@ def job_for(proc):
 JOBLESS = []
 
 
-def start(args, env):
+def start(args, env, cwd=None):
     # On POSIX the harness gets its own process group, so the person's Ctrl-C reaches only the loop, which ends the round.
-    return subprocess.Popen(args, stdin=subprocess.PIPE, stdout=subprocess.PIPE, env=env, start_new_session=os.name == "posix")
+    return subprocess.Popen(args, stdin=subprocess.PIPE, stdout=subprocess.PIPE, env=env, cwd=cwd, start_new_session=os.name == "posix")
 
 
 def processes():
@@ -370,9 +371,9 @@ def lines(chunks):
         yield rest
 
 
-def run_harness(args, brief, timeout, env=None, keep=False):
+def run_harness(args, brief, timeout, env=None, keep=False, cwd=None):
     """Run one round. Shows the harness's output as it arrives and also returns it. Returns (exit code or reason, output)."""
-    proc = start(args, env)
+    proc = start(args, env, cwd)
     family = Family(proc)
     if env is not None:
         record_input(env, "cli" if cli_name(args[0]) else "wrapper", args, brief.encode("utf-8"))
@@ -420,7 +421,8 @@ HANDOFF = """When you finish, end your final response with this block. It is sav
 Handoff: <what you did and what you observed, in a few sentences>
 Results: <one line per result you are claiming, or "none". End a line with [known: reference] if it is already known, or [new] if you looked and found no prior statement>
 Ruled out: <one line per approach this round showed does not work, with the reason, or "none">
-Decision needed: <anything only the person can decide, as a question they can answer in a line, or "none">
+Assumed: <anything only the person could have decided: the cautious choice you made instead, and why, or "none">
+Leads: <one line per new place worth looking, most promising first, each with its quickest test and [score: 1-5] for the rounds it is worth, or "none">
 Next: <the single most useful next step>"""
 
 
@@ -657,36 +659,65 @@ def run_conversation(args, brief, timeout, env, inbox, reply_wait=120, keep=Fals
     return outcome, ("\n\n".join(r for r in replies if r) or screen.tail).replace("\r\n", "\n"), stats
 
 
-def fingerprint(patterns, limit=2000, large=20 << 20):
-    """Hash the checker's files, named by glob patterns inside the working folder, so a round that edits them is noticed."""
-    root, seen = Path.cwd().resolve(), {}
-    for pattern in patterns:
-        if not isinstance(pattern, str) or not pattern.strip() or ".." in pattern or PurePath(pattern).anchor:
-            continue  # nothing outside the working folder
-        if pattern.endswith("**"):  # before Python 3.13 a trailing ** matches only folders
-            pattern += "/*"
+REFUTERS_PER_ROUND = 4
+VERDICT = re.compile(r"^\s*(?:[-*]\s+)?\**\s*verdict\s*\**\s*:\s*\**\s*(refuted|stands)\b", re.I | re.M)
+
+
+def run_gates(a, query, command):
+    """Run the project's gates on what the round claimed. The server names, for each claim with an artifact, the next gate
+    it has not passed; passing one makes the next due, so ask again until nothing is. A command gate passes on exit code
+    0. A refuter gate passes when a fresh round, shown only the claim, ends with "Verdict: stands". A gate that cannot
+    start, runs out of time or (a refuter) gives no verdict is an error. Each verdict goes on the claim's thread."""
+    done, refuters, silent = set(), 0, 0
+    for _ in range(10):  # at most this many gates deep
         try:
-            for path in root.glob(pattern):
-                name = path.relative_to(root).as_posix()
-                if name in seen or not path.is_file() or not path.resolve().is_relative_to(root):
+            pending = json.loads(call("/api/gates?" + query)).get("pending") or []
+        except (OSError, ValueError, AttributeError):
+            return
+        pending = [x for x in pending if isinstance(x, dict) and (x.get("id"), x.get("gate")) not in done]
+        if not pending:
+            return
+        for item in pending:
+            done.add((item.get("id"), item.get("gate")))
+            if not isinstance(item.get("command"), list):
+                # A refuter is a whole round of the harness. A few per research round; the rest stay due for the next one.
+                # A harness that twice gives no verdict is not one that can refute (a plain script, say): leave them due.
+                if refuters >= REFUTERS_PER_ROUND or silent >= 2:
                     continue
-                if len(seen) >= limit:
-                    return seen
-                try:
-                    info = path.stat()
-                    if info.st_size > large:
-                        seen[name] = f"{info.st_size}:{info.st_mtime_ns}"
-                        continue
-                    digest = hashlib.sha256()
-                    with open(path, "rb") as f:
-                        while block := f.read(1 << 20):
-                            digest.update(block)
-                    seen[name] = digest.hexdigest()
-                except OSError:
-                    seen[name] = "unreadable"
-        except (OSError, ValueError, NotImplementedError):
-            continue
-    return seen
+                refuters += 1
+            artifact, limit = str(item.get("artifact") or ""), float(item.get("timeout_min") or 10) * 60
+            # A gate runs in the folder the claim's round worked in, where its artifact was left, whichever loop runs it.
+            where = item.get("cwd") if isinstance(item.get("cwd"), str) and os.path.isdir(item["cwd"]) else None
+            print(f"\n[loop] Gate {item.get('gate')} for [{item.get('id')}]" + (f" on {artifact}" if artifact else ""), flush=True)
+            try:
+                if isinstance(item.get("command"), list):
+                    argv = [part.replace("{artifact}", artifact) for part in item["command"]]
+                    argv = resolve(argv + ([] if any("{artifact}" in part for part in item["command"]) else [artifact]))
+                    if os.name == "nt" and argv[0].lower().endswith((".cmd", ".bat")):
+                        # cmd.exe would read the artifact's name, which a model wrote, as part of a command line
+                        raise ValueError(f"{Path(argv[0]).name} runs through cmd.exe, which cannot be handed an artifact safely; make the gate an .exe or a script run by an interpreter")
+                    code, output = run_harness(argv, "", limit, cwd=where)
+                    verdict = "passed" if code == 0 else "failed" if isinstance(code, int) else "error"
+                else:  # a refuter: the harness itself, fresh, with a brief that holds only the claim
+                    brief = str(item.get("brief") or "")
+                    with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".txt", prefix="refute-", delete=False) as f:
+                        f.write(brief)
+                    try:
+                        code, output = run_harness([part.replace("{brief_file}", f.name).replace("{brief}", brief) for part in command], brief, limit, cwd=where)
+                    finally:
+                        os.unlink(f.name)
+                    said = VERDICT.findall(output)
+                    verdict = "error" if code != 0 or not said else "failed" if said[-1].lower() == "refuted" else "passed"
+                    silent = silent + 1 if verdict == "error" else 0
+                detail = output.strip() if isinstance(code, int) else f"{output.strip()}\n{code}".strip()
+            except (OSError, ValueError) as e:
+                verdict, detail = "error", f"the gate could not be started: {e}"
+            print(f"[loop] Gate {item.get('gate')} {verdict} for [{item.get('id')}]", flush=True)
+            try:
+                call("/api/events", {"project": a.project, "type": "research", "id": item.get("id"), "source": "gate", "gate": item.get("gate"),
+                                     "verdict": verdict, "detail": detail[-4000:], "checked": artifact, "fp": item.get("fp")})
+            except OSError:
+                pass  # it stays due (the server was away, or the gates changed while this one ran), and runs again after the next round
 
 
 def main():
@@ -702,8 +733,8 @@ def run_loop():
                                 usage="loop.py PROJECT [options] -- HARNESS COMMAND ...")
     p.add_argument("project")
     p.add_argument("--agent", default=os.environ.get("PROJECT_VIEW_AGENT") or socket.gethostname(), help="this agent's name on the page")
-    p.add_argument("--harness", help="label shown on the Agents page (default: the command's name)")
-    p.add_argument("--model", help="model name shown on the Agents page (default: taken from a --model in the harness command)")
+    p.add_argument("--harness", help="label shown on the page (default: the command's name)")
+    p.add_argument("--model", help="model name shown on the page (default: taken from a --model in the harness command)")
     p.add_argument("--max-iterations", type=int, default=0, help="stop after this many (default: no limit)")
     p.add_argument("--max-hours", type=float, default=0, help="stop after this long (default: no limit)")
     p.add_argument("--timeout-min", type=float, default=0, help="end one iteration after this many minutes (default 0: no limit)")
@@ -772,18 +803,16 @@ def run_loop():
             return finish(f"Loop stopped: reached {a.max_hours:g} hours")
         try:
             state = json.loads(call("/api/project?" + query))
-            if state.get("hold"):  # paused, awaiting the person, or past the time they allowed: one reason, decided by the server
+            if state.get("hold"):  # the person paused the project
                 print(f"[loop] on hold: {state['hold']}; checking again in 15 s", flush=True)
                 time.sleep(15)
                 continue
-            turn = json.loads(call("/api/slot", {"project": a.project, "agent": a.agent}))
-            if not turn.get("granted"):  # the person set a limit on agents working at once, and the slots are taken
-                print(f"[loop] waiting for a free slot ({turn.get('limit')} at once; working now: {', '.join(turn.get('working') or [])}); checking again in 15 s", flush=True)
-                time.sleep(15)
-                continue
-            if n == 0:
-                time.sleep(4)  # agents started together each take their slot first, so every brief can show who else is here
-            brief = call("/api/brief?" + query)
+            brief, frame = call("/api/brief?" + query + "&as=json"), None
+            try:  # the server also says which frame it gave the round, so the round's note can be counted against it
+                given = json.loads(brief)
+                brief, frame = given["brief"], given.get("frame")
+            except (ValueError, KeyError, TypeError):
+                pass
         except (OSError, ValueError) as e:
             print(f"[loop] cannot reach {URL} ({e}); retrying in 15 s", flush=True)
             time.sleep(15)
@@ -793,9 +822,7 @@ def run_loop():
         brief += "\n\n" + HANDOFF
         with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".txt", prefix="brief-", delete=False) as f:
             f.write(brief)
-        say(a, f"Iteration {n} started")
-        guarded = state.get("protected") if isinstance(state.get("protected"), list) else []
-        before = fingerprint(guarded) if guarded else None
+        say(a, f"Iteration {n} started", frame=frame)  # with a frame the round settles it; without one it widens
         began, stats = time.time(), {}
         try:
             argv = [part.replace("{brief_file}", f.name).replace("{brief}", brief) for part in command]
@@ -815,20 +842,12 @@ def run_loop():
         if output.strip() and not a.no_notes:  # keep the harness's own account of the round where the person can read it
             try:
                 call("/api/events", {"project": a.project, "type": "item", "section": "round-notes", "agent": a.agent, "harness": a.harness,
-                                     "key": f"Round {n} · {a.agent} · {time.strftime('%Y-%m-%d %H:%M')}", "data": {"loop_session": a.session}, "body": output.strip()[-6000:]})
+                                     "key": f"Round {n} · {a.agent} · {time.strftime('%Y-%m-%d %H:%M')}",
+                                     "data": {"loop_session": a.session, "cwd": os.getcwd(), **({"frame": frame} if frame else {})}, "body": output.strip()[-6000:]})
             except OSError:
                 pass
+            run_gates(a, query, command)
 
-        try:
-            call("/api/slot", {"project": a.project, "agent": a.agent, "release": True})  # let the next agent in
-        except OSError:
-            pass
-        if before is not None:
-            after = fingerprint(guarded)
-            changed = sorted(k for k in before.keys() | after.keys() if before.get(k) != after.get(k))
-            if changed:
-                more = f" and {len(changed) - 5} more" if len(changed) > 5 else ""
-                say(a, f"Checker changed during round {n}: " + ", ".join(changed[:5]) + more, tamper=changed[:20])
         if code == 0:
             say(a, f"Iteration {n} finished (exit 0)", stats=stats)
             failures = 0
