@@ -118,7 +118,7 @@ def check(directory):
             call("/api/events", {"project": "old", "type": "question", "id": "q999", "answer": "no", "source": "you"})
             raise AssertionError("an answer to an assumption that does not exist was accepted")
         except HTTPError as error:
-            assert "no assumption or question has the id q999" in json.loads(error.read())["error"]
+            assert "no assumption has the id q999" in json.loads(error.read())["error"]
         try:
             call("/api/events", {"project": "old", "type": "research", "id": "k2", "gate": "refutation", "verdict": "passed"})
             raise AssertionError("a reported verdict was accepted")

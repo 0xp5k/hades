@@ -14,7 +14,7 @@ What the loop, the page and a chat agent call:
   GET  /api/project?project=X                 the project's config, and "hold" when it is paused
   GET  /api/projects                          every project, its launched loop and the launch recipes
   GET  /api/events?project=X&after=N          the log
-  GET  /api/research?project=X&q=TEXT&area=A  current research threads
+  GET  /api/research?project=X&q=TEXT&area=A  every frame and claim, with where it stands
   GET  /api/gates?project=X                   the claims waiting for a gate, and what to run on each
   POST /api/frames   {"project", "frames"}    queue places to look, many at once
   POST /api/events   {"project", "type", ...} report: activity, note (a round's closing handoff), question or research
@@ -30,7 +30,6 @@ import hashlib
 import json
 import os
 import re
-import select
 import shlex
 import shutil
 import signal
@@ -239,7 +238,7 @@ def ingest(data):
     elif type == "research" and data.get("source") == "gate":  # one gate's verdict on what a thread claims; nothing else about it changes
         cfg = config(project)
         if not event.get("id") or data.get("verdict") not in GATE_VERDICTS or not any(g["name"] == data.get("gate") for g in gates_of(cfg)):
-            raise ValueError("a gate verdict needs the thread's id, one of the project's gates by name, and verdict one of: " + ", ".join(GATE_VERDICTS))
+            raise ValueError("a gate verdict needs the claim's id, one of the project's gates by name, and verdict one of: " + ", ".join(GATE_VERDICTS))
         # Stamped with what it ran under, so it stops counting when the gates or the locked files change. One that ran
         # under an earlier version (they changed while it ran) is refused: the gate is still due, and runs again.
         seal = next(g["fp"] for g in sealed(project, cfg) if g["name"] == data["gate"])
@@ -249,11 +248,11 @@ def ingest(data):
                  "checked": str(data.get("checked") or "")[:300], "fp": seal, "source": "gate",
                  **({"rating": data["rating"]} if data.get("rating") in (1, 2, 3, 4, 5) and not isinstance(data.get("rating"), bool) else {})}
     elif type == "research" and data.get("source") == "you" and any(k in data for k in ("priority", "status", "score", "audited")) and "text" not in data:
-        # the person's mark alone (Pursue, Drop, Reopen, a score, their audit): the thread's claim, evidence and history stay as they were
+        # the person's mark alone (first in the queue, dropped, reopened, a score, their audit): the claim and its history stay as they were
         if not event.get("id") or any(k in data and not isinstance(data[k], bool) for k in ("priority", "audited")) \
                 or ("status" in data and data["status"] not in ("open", "superseded", "contradicted")) \
                 or ("score" in data and (isinstance(data["score"], bool) or data["score"] not in (1, 2, 3, 4, 5))):
-            raise ValueError("a change to a thread needs its id, and priority or audited true or false, score 1 to 5, or status open (reopen), superseded (drop) or contradicted (rule out)")
+            raise ValueError("a change to a frame or claim needs its id, and priority or audited true or false, score 1 to 5, or status open (reopen), superseded (drop) or contradicted (rule out)")
         event = {"type": type, "id": event["id"], **{k: data[k] for k in ("priority", "status", "score", "audited") if k in data}, "source": "you"}
         if data.get("audited"):  # their audit is of this artifact under these gates; it lapses when either changes
             seen = next((n for n in research(project) if n["id"] == event["id"]), {})
@@ -294,7 +293,7 @@ def ingest(data):
                 event["id"] = f"{'k' if type == 'research' else 'q'}{n}"
             known = (type, event["id"]) in IDS[project]
             if not known and ("text" not in event or (not event["text"] and data.get("id") is not None)):
-                raise ValueError(f'no {"research thread" if type == "research" else "assumption or question"} has the id {str(data.get("id"))[:80]}')
+                raise ValueError(f'no {"frame or claim" if type == "research" else "assumption"} has the id {str(data.get("id"))[:80]}')
             if not known and not event["text"]:
                 raise ValueError("text is required")
         event = {"ts": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"), **event}
@@ -585,7 +584,7 @@ def research(project, query="", area=""):
                 if old:
                     nodes[e["id"]] = {**old, **{k: e[k] for k in MARK_KEYS if k in e}, "history": [*old["history"], update]}
                     if e.get("priority") is True:
-                        attempts[e["id"]] = 0  # Pursue puts it at the front with its rounds to spend again
+                        attempts[e["id"]] = 0  # the person's mark puts it at the front with its rounds to spend again
                 continue
             # Claimed again with another artifact, reworded, or claimed again after a gate said no: a different claim, so every gate
             # and the audit are still to come. Saying the same thing about the same artifact changes nothing.
@@ -1119,7 +1118,7 @@ def plan(project, agent, hold=False):
            # What the round is for, and nothing about how: the model does the research.
            "This round has one frame to settle, named at the end of this brief." if frame else
            "Nothing is queued, so this round is yours: find what is worth finding, however you see fit. What you do not get to goes on Leads lines.",
-           *(["A Results or Ruled out line that settles a thread listed below starts with its id in brackets, like [k12]."] if live else []),
+           *(["A Results or Ruled out line that settles a frame or claim listed below starts with its id in brackets, like [k12]."] if live else []),
            "Nobody is watching. Where only the person could decide, take the cautious option and say so on the Assumed line.",
            "",
            *rule]
