@@ -55,7 +55,7 @@ text = lambda value: say({"type": "stream_event", "event": {"type": "content_blo
 done = lambda value, **more: say({"type": "result", "subtype": "success", "result": value, **more})
 """
     child = head + """
-brief = sys.stdin.read()
+brief = sys.stdin.buffer.read().decode("utf-8")  # the brief arrives as UTF-8 whatever the console's own encoding
 say({"type": "system", "subtype": "init", "model": "fixture"})
 sys.stdout.buffer.write(b"plain warning \\xff from the CLI\\n" + json.dumps({"type": "stream_event", "event": {"type": "content_block_delta",
     "delta": {"type": "text_delta", "text": "Working on: " + brief}}}).encode()[:-4] + b"\\xfe\\"}}}\\n")
