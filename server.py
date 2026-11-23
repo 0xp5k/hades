@@ -312,7 +312,7 @@ HANDOFF = re.compile(r"^[ \t]*(?:[-*][ \t]+)?(?:#+[ \t]*)?(?:\*\*|__)?[ \t]*hand
 LABEL = re.compile(r"^\s*(?:[-*]\s+)?(?:#+\s*)?(?:\*\*|__)?\s*(handoff|results?|ruled[ -]out|decisions?(?:\s+needed)?|assum(?:ed|ptions?)|leads?|next)"
                    r"\s*(?:\*\*|__)?\s*(?::\s*(?:\*\*|__)?\s*(.*))?$", re.I)
 BULLET = re.compile(r"^\s*(?:[-*+\u2022]|\d+[.)])\s+")
-TAG = re.compile(r"\s*\[(known|new)(?::\s*([^\]]*))?\]\s*$", re.I)
+TAG = re.compile(r"\s*\[known(?::\s*([^\]]*))?\]\s*$", re.I)  # the round's own word that a result is already known, with where
 CHECK_TAG = re.compile(r"\s*\[check:\s*([^\]]+)\]", re.I)
 SCORE_TAG = re.compile(r"\s*\[score:\s*([1-5])\s*\]", re.I)
 
@@ -377,9 +377,9 @@ def from_handoff(project, note):
             text = (line[:tag.start()].strip() if tag else line)[:400]
             if not text:
                 continue
-            extra = {"known": "new" if tag.group(1).lower() == "new" else (tag.group(2) or "").strip() or "known"} if tag else {}
+            extra = {"known": (tag.group(1) or "").strip() or "known"} if tag else {}
             extra.update({"score": min(4, int(worth.group(1)))} if worth and label == "leads" else {})  # 5 is the person's to give
-            if extra.get("known", "new") != "new":  # the round says it is already known: that is not a result, and no gate needs to say so
+            if "known" in extra:  # the round says it is already known: that is not a result, and no gate needs to say so
                 label, status = "ruled out", "contradicted"
                 text, artifact, extra = text, {}, {"conditions": "already known: " + extra["known"]}
             # A line that starts with a waiting thread's id, as [id], settles that thread in place, so it leaves the work
@@ -1269,7 +1269,15 @@ def status(project, base):
                 "\n".join(told)[:1200]]
     elif silent >= 0:
         out += ["", "No handoff yet: the last round ended without a Handoff block, so nothing was recorded from it."]
-    out += ["", f"What you can do from here: {base}/AGENTS.md"]
+    p = f'"project": "{project}"'
+    out += ["", f"WHAT YOU CAN DO (each is JSON POSTed to {base}; the loop never waits for any of it)",
+            f'- Queue places to look: /api/frames {{{p}, "frames": ["..."]}}',
+            f'- Put a frame first, with its rounds to spend again: /api/events {{{p}, "type": "research", "id": "k1", "priority": true, "source": "you"}}',
+            '- Drop a frame or a claim, or rule it out: the same, with "status": "superseded" or "contradicted" in place of priority',
+            f'- Tell every round something: /api/project {{{p}, "direction": "..."}}',
+            f'- Overrule an assumption: /api/events {{{p}, "type": "question", "id": "q1", "answer": "...", "source": "you"}}',
+            f'- Hold or release the loop: /api/project {{{p}, "paused": true}}. Start or stop it: /api/launch or /api/stop {{{p}}} (starting spends the person\'s model usage: ask first)',
+            f"- Gates, loop settings, new projects: {base}/AGENTS.md"]
     return "\n".join(out) + "\n"
 
 

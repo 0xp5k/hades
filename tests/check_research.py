@@ -224,7 +224,7 @@ def check(directory):
         def note(project, body, agent="a1"):
             call("/api/events", {"project": project, "type": "note", "agent": agent, "key": f"Round · {time.time()}", "body": body})
         note("lean", "Earlier Handoff: a draft.\nMore work.\n\n**Handoff:** Checked the header path. Only you can say whether fuzzing is in scope.\n"
-                     "**Results:**\n- Off-by-one in footer length [known: CVE-2020-1]\n1. Parser crashes on empty input [new]\n"
+                     "**Results:**\n- Off-by-one in footer length [known: CVE-2020-1]\n1. Parser crashes on empty input\n"
                      "- **Header length is trusted.**\n* parser crashes on empty  input\nRuled out: none\n"
                      "Decision needed: Is fuzzing the live service in scope?\nNext: try the footer")
         threads = call("/api/research?project=lean")
@@ -234,7 +234,7 @@ def check(directory):
         off = by["Off-by-one in footer length"]
         assert (off["status"], off["conditions"], off["agent"], off["bucket"]) == ("contradicted", "already known: CVE-2020-1", "a1", "ruled") and "known" not in off
         crash = by["Parser crashes on empty input"]
-        assert crash["known"] == "new"
+        assert "known" not in crash
         assert all(e["type"] != "item" for e in call("/api/events?project=lean")["events"])  # the note is the record of a round; nothing is copied out of it
         # The decision reaches the person as a question; it is not asked twice, and their answer is given to later rounds as decided.
         asked = [e for e in call("/api/events?project=lean")["events"] if e["type"] == "question"]
@@ -272,7 +272,7 @@ def check(directory):
         # The person's Drop and Reopen: a status change alone keeps everything else.
         call("/api/events", {"project": "lean", "type": "research", "id": crash["id"], "status": "contradicted", "source": "you"})
         dropped = next(t for t in call("/api/research?project=lean") if t["id"] == crash["id"])
-        assert dropped["status"] == "contradicted" and dropped["text"] == crash["text"] and dropped["known"] == "new" and dropped["agent"] == "a1"
+        assert dropped["status"] == "contradicted" and dropped["text"] == crash["text"] and dropped["agent"] == "a1"
         assert "- Parser crashes on empty input" in brief("lean", "a2").split("RULED OUT (do not")[1]
         call("/api/events", {"project": "lean", "type": "research", "id": crash["id"], "status": "open", "source": "you"})
         assert next(t for t in call("/api/research?project=lean") if t["id"] == crash["id"])["status"] == "open"
@@ -492,11 +492,11 @@ def check_units():
                 lead = {n["text"]: n["id"] for n in server.research("s")}
                 for i in lead.values():
                     server.ingest({"project": "s", "type": "research", "id": i, "priority": True, "source": "you"})
-                note(f"Handoff: x\nResults:\n- [{lead['first lead']}]: it holds [new]\nRuled out:\n- [{lead['second lead']}]: a guard stops it\nNext: y", 2)
+                note(f"Handoff: x\nResults:\n- [{lead['first lead']}]: it holds\nRuled out:\n- [{lead['second lead']}]: a guard stops it\nNext: y", 2)
                 now = {n["id"]: n for n in server.research("s")}
                 assert len(now) == 2, now
                 first, second = now[lead["first lead"]], now[lead["second lead"]]
-                assert (first["status"], first["text"], first["found_in"], first["known"], first["priority"]) == ("supported", "it holds", "first lead", "new", True), first
+                assert (first["status"], first["text"], first["found_in"], first["priority"]) == ("supported", "it holds", "first lead", True), first
                 assert (second["status"], second["conditions"], second["text"]) == ("contradicted", "a guard stops it", "second lead"), second
                 listed = [line for line in server.brief("s", "b").partition("CLAIMED (another round's word")[2].partition("RULED OUT")[0].splitlines() if line.startswith("- [")]
                 assert listed == [f"- [{lead['first lead']}] it holds (the person's priority)"], listed
@@ -506,9 +506,9 @@ def check_units():
                 assert after[lead["first lead"]]["text"] == "it holds" and any(n["text"].startswith("Unlike the idea in") for n in after.values()), after
                 assert any(n["text"] == "trusting the previous handoff: it was stale" and n["status"] == "contradicted" for n in after.values()), after
                 # A heading with no colon is still a label, and a tag survives a line longer than the text limit, in any order.
-                note("## Handoff\nlooked around\n**Results**\n- " + "z" * 500 + " [score: 3] [new] [check: long.bin]\nNext\n- carry on", 4)
+                note("## Handoff\nlooked around\n**Results**\n- " + "z" * 500 + " [score: 3] [check: long.bin]\nNext\n- carry on", 4)
                 long = next(n for n in server.research("s") if n["text"].startswith("zzz"))
-                assert (len(long["text"]), long["artifact"], long["known"]) == (400, "long.bin", "new"), long
+                assert (len(long["text"]), long["artifact"]) == (400, "long.bin"), long
                 before = len(server.load("s"))
                 note("no marker in this one", 5)
                 assert server.load("s")[-1]["text"] == "A round ended without a Handoff block: nothing was recorded from it" and len(server.load("s")) == before + 2
@@ -552,11 +552,11 @@ def check_units():
                 assert "Nothing re-checks" not in text
                 note = lambda body, n, **data: server.ingest({"project": "c", "type": "note", "key": f"Round {n}", "agent": "a", "body": body,
                                                               **({"data": data} if data else {})})
-                note("Handoff: x\nResults:\n- Lemma one holds [check: one.bin] [new]\n- Lemma two holds [check:  two.bin ]\n- Lemma zero is classical [known: Hardy 1915] [check: zero.bin]\n"
+                note("Handoff: x\nResults:\n- Lemma one holds [check: one.bin]\n- Lemma two holds [check:  two.bin ]\n- Lemma zero is classical [known: Hardy 1915] [check: zero.bin]\n"
                      "- It looks true for n < 100\nNext: y", 1)
                 by = {n["text"]: n for n in server.research("c")}
                 one, two, loose = by["Lemma one holds"], by["Lemma two holds"], by["It looks true for n < 100"]
-                assert (one["artifact"], one["known"], one["state"], one["at"], one["standing"]) == ("one.bin", "new", "waiting", "reproduces", 0), one
+                assert (one["artifact"], one["state"], one["at"], one["standing"]) == ("one.bin", "waiting", "reproduces", 0), one
                 assert two["artifact"] == "two.bin" and (loose["state"], loose["at"], loose["frame"]) == ("unchecked", "reproduces", False), (two, loose)
                 old = by["Lemma zero is classical"]  # the round itself says it is known: ruled out with the reference, and no gate is spent on it
                 assert (old["status"], old["conditions"], old["state"], old.get("artifact")) == ("contradicted", "already known: Hardy 1915", None, None), old

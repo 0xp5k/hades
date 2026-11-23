@@ -415,7 +415,7 @@ def run_harness(args, brief, timeout, env=None, keep=False, cwd=None):
 STREAM = ["--output-format", "stream-json", "--include-partial-messages", "--verbose"]
 HANDOFF = """When you finish, end your final response with this block. It is saved as your only memory of this round and recorded on the dashboard for you, so you do not need to report anything else.
 Handoff: <what you did and what you observed, in a few sentences>
-Results: <one line per result you are claiming, the strongest first and at most 8, or "none". If gates are listed above, end each with [check: <artifact>]. Add [new] if you looked and found no earlier statement of it>
+Results: <one line per result you are claiming, the strongest first and at most 8, or "none". If gates are listed above, end each with [check: <artifact>]>
 Ruled out: <one line per approach this round showed does not work, with the reason, or "none". Something that turned out to be already known goes here too, with the reference>
 Assumed: <anything only the person could have decided: the cautious choice you made instead, and why, or "none">
 Leads: <one line per new place worth looking, most promising first, each with its quickest test and a score: [score: 4] direct evidence, [score: 3] plausible, [score: 1] a long shot; or "none">

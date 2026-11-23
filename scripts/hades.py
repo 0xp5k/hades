@@ -85,14 +85,13 @@ def check():
         return f"{len(text.splitlines())} lines"
 
     def loop():
-        stand_in = [sys.executable, "-c", "import sys; sys.stdin.read(); print('Handoff: Stand-in round.\\nResults: The header length is trusted [new]\\n"
+        stand_in = [sys.executable, "-c", "import sys; sys.stdin.read(); print('Handoff: Stand-in round.\\nResults: The header length is trusted\\n"
                     "Ruled out: The checksum is not the cause\\nDecision needed: May I fuzz the live service?\\nNext: Read the parser')"]
         done = subprocess.run([sys.executable, str(server.ROOT / "scripts" / "loop.py"), PROJECT, "--agent", "self-check", "--max-iterations", "1", "--pause", "0", "--"] + stand_in,
                               env={**os.environ, "PROJECT_VIEW_URL": url}, cwd=tmp, capture_output=True, text=True, timeout=60)
         need(done.returncode == 0, f"loop.py exited with {done.returncode}: {(done.stdout + done.stderr)[-300:]}")
         events = http(f"/api/events?project={PROJECT}")["events"]
-        need(any(e.get("section") == "round-notes" and "Stand-in round" in e.get("body", "") for e in events), "the round's output did not reach the Round notes page")
-        need(any(e.get("section") == "now" and e.get("key") == "Current update" for e in events), "the handoff did not become the current update")
+        need(any(e["type"] == "note" and e.get("body", "").startswith("Handoff: Stand-in round") for e in events), "the round's handoff was not saved as its note")
         return "one round with a stand-in harness"
 
     def memory():
@@ -108,24 +107,13 @@ def check():
         return "results, dead ends and decisions reach the next brief"
 
     def research():
-        first = http("/api/events", {"project": PROJECT, "type": "research", "agent": "self-check", "kind": "hypothesis",
-                                      "status": "open", "text": "A boundary may be wrong", "next": "Compare the guarded paths",
-                                      "scope": "parser boundary", "snapshot": "v1",
-                                      "evidence": [{"ref": "parser.py", "note": "Candidate source"}]})
-        second = http("/api/events", {"project": PROJECT, "type": "research", "agent": "self-check", "kind": "observation",
-                                       "status": "supported", "text": "The paths differ", "links": [{"to": first["id"], "relation": "supports"}]})
-        http("/api/events", {"project": PROJECT, "type": "research", "id": first["id"], "agent": "self-check",
-                             "kind": "hypothesis", "status": "supported", "text": "A boundary may be wrong"})
-        nodes = {n["id"]: n for n in http(f"/api/research?project={PROJECT}")}
-        need(nodes[first["id"]]["status"] == "supported" and nodes[first["id"]]["evidence"][0]["ref"] == "parser.py",
-             "a research update lost its evidence")
-        need(nodes[first["id"]]["scope"] == "parser boundary" and nodes[first["id"]]["snapshot"] == "v1",
-             "a research update lost its scope or snapshot")
-        need(len(nodes[first["id"]]["history"]) == 2 and nodes[first["id"]]["history"][0]["status"] == "open"
-             and nodes[first["id"]]["history"][1]["status"] == "supported", "research history lost its changes")
-        need(nodes[second["id"]]["links"][0]["to"] == first["id"], "research links were lost")
-        need("A boundary may be wrong" in http(f"/api/brief?project={PROJECT}&agent=self-check"), "the brief omitted research")
-        return "linked research survives updates and reaches the brief"
+        first = http("/api/events", {"project": PROJECT, "type": "research", "agent": "self-check", "status": "open", "text": "A boundary may be wrong", "next": "Compare the guarded paths"})
+        http("/api/events", {"project": PROJECT, "type": "research", "id": first["id"], "agent": "self-check", "status": "supported", "text": "A boundary may be wrong"})
+        node = next(n for n in http(f"/api/research?project={PROJECT}") if n["id"] == first["id"])
+        need(node["status"] == "supported" and [h["status"] for h in node["history"]] == ["open", "supported"], "a frame that became a claim lost its history")
+        need(node["bucket"] in ("waiting", "unchecked") and node["next"] == "Compare the guarded paths", f"the claim is not where the record should put it: {node['bucket']}")
+        need("A boundary may be wrong" in http(f"/api/brief?project={PROJECT}&agent=self-check"), "the brief omitted the claim")
+        return "a frame becomes a claim, keeps its history and reaches the brief"
 
     def gating():
         home = server.PROJECTS / "self-check-gated"
@@ -143,7 +131,7 @@ def check():
         (tmp / "standin.py").write_text("import sys\nbrief = sys.stdin.read()\nif 'Rating: <' in brief:\n    print('Rating: 4 - a remote fault in a default build')\n    sys.exit(0)\nif 'Verdict:' in brief:\n"
             "    print('Verdict: refuted - reported upstream as issue 12' if 'footer' in brief else 'Verdict: stands - searched the tracker and the changelog')\n"
             "    sys.exit(0)\nfor name, body in (('good.txt', 'overflow'), ('also.txt', 'overflow'), ('bad.txt', 'nothing')):\n    open(name, 'w').write(body)\n"
-            "print('Handoff: Three candidates.\\nResults:\\n- The length field overflows [new] [check: good.txt]\\n- The footer overflows [check: also.txt]\\n"
+            "print('Handoff: Three candidates.\\nResults:\\n- The length field overflows [check: good.txt]\\n- The footer overflows [check: also.txt]\\n"
             "- The trailer overflows [check: bad.txt]\\n- The header is odd\\nLeads:\\n- The tokenizer on nested brackets: time a deep input [score: 5]\\nNext: x')\n")
         done = subprocess.run([sys.executable, str(server.ROOT / "scripts" / "loop.py"), "self-check-gated", "--agent", "self-check", "--max-iterations", "1", "--pause", "0",
                                "--", sys.executable, str(tmp / "standin.py")],
@@ -165,7 +153,7 @@ def check():
 
     steps = [("The page loads", page), ("A project is created", project), ("A report is accepted and a malformed one refused", report),
              ("The brief is written", brief), ("The loop runs a round", loop), ("The round's handoff becomes the record", memory),
-             ("Research threads stay linked", research), ("The gates decide what is established", gating)]
+             ("A frame becomes a claim", research), ("The gates decide what is established", gating)]
     print(f"Checking this install (Python {sys.version.split()[0]}) ...")
     failed = 0
     for label, step in steps:
