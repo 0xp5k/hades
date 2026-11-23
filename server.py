@@ -154,17 +154,17 @@ def gates_of(cfg):
         other = g.get("recipe") if not runs and isinstance(g.get("recipe"), str) and NAME.match(g["recipe"]) else None
         out.append({"name": name, **({"command": command} if runs else {"refute": refute} if refute else {"rate": rate}), **({"recipe": other} if other else {}),
                     "timeout_min": limit if isinstance(limit, (int, float)) and not isinstance(limit, bool) and 0 < limit <= 1440 else 10})
-    return out
+    return sorted(out, key=lambda g: "rate" in g)  # raters last, wherever they were written: they rate what the others let through
 
 
 HASHED = {}  # locked file -> (its modification time and size, its hash), so a poll does not re-read a large locked corpus
 
 
-def fingerprint(project, cfg):
-    """What every verdict is bound to: the gates as configured, and the files in the project's folder that the person
-    locked (the exact question, the gate's own script). Change either and earlier verdicts are stale: they count for
-    nothing until the gates have run again."""
-    gates = gates_of(cfg)
+def fingerprint(project, cfg, gates=None):
+    """What the question is bound to: the gates as configured, and the files in the project's folder that the person
+    locked (the exact question, the gate's own script). A verdict is bound to its own gate and the locked files (see
+    sealed): change either and it is stale, and counts for nothing until that gate has run again."""
+    gates = gates_of(cfg) if gates is None else gates
     if not gates:
         return ""
     seal, root = hashlib.sha256(json.dumps(gates, sort_keys=True).encode()), (PROJECTS / project).resolve()
@@ -187,13 +187,19 @@ def fingerprint(project, cfg):
     return seal.hexdigest()[:16]
 
 
+def sealed(project, cfg):
+    """The gates, each with the fingerprint its verdicts carry: that gate alone and the locked files. So adding a gate,
+    or rewording one, leaves the other gates' verdicts standing."""
+    return [{**g, "fp": fingerprint(project, cfg, [{k: v for k, v in g.items() if k != "timeout_min"}])} for g in gates_of(cfg)]  # a longer time limit asks the same question
+
+
 def public_config(project):
     cfg = config(project)
     cfg["direction"] = cfg["direction"] if isinstance(cfg.get("direction"), str) else ""
     cfg["loop"] = clean_loop(cfg.get("loop"), strict=False)
     cfg["problem"] = config_problem(project)
     cfg["default_gates"] = "gates" not in cfg  # the built-in refuter is in force: the project set no gates of its own
-    cfg["gates"], cfg["fingerprint"] = gates_of(cfg), fingerprint(project, cfg)
+    cfg["gates"], cfg["fingerprint"] = sealed(project, cfg), fingerprint(project, cfg)
     cfg["artifact"] = str(cfg.get("artifact") or "").strip()[:300]
     cfg["lock"] = [str(x)[:200] for x in cfg["lock"][:50] if isinstance(x, str)] if isinstance(cfg.get("lock"), list) else []
     return cfg
@@ -240,7 +246,7 @@ def ingest(data):
             raise ValueError("a gate verdict needs the thread's id, one of the project's gates by name, and verdict one of: " + ", ".join(GATE_VERDICTS))
         # Stamped with what it ran under, so it stops counting when the gates or the locked files change. One that ran
         # under an earlier version (they changed while it ran) is refused: the gate is still due, and runs again.
-        seal = fingerprint(project, cfg)
+        seal = next(g["fp"] for g in sealed(project, cfg) if g["name"] == data["gate"])
         if data.get("fp") is not None and data["fp"] != seal:
             raise ValueError("the gates or the locked files changed while this gate ran; it is still due and will run again")
         event = {"type": type, "id": event["id"], "gate": data["gate"], "verdict": data["verdict"], "detail": str(data.get("detail") or "")[-4000:],
@@ -379,7 +385,7 @@ def from_handoff(project, note):
             ingest({"project": project, "type": "question", "text": line[:2000], "agent": agent, "origin": "handoff"})
     # Whatever is still work can be settled by name: an open frame, a claim a gate stopped (the round may claim it again
     # with a repaired artifact, or rule it out), and a claim the person marked.
-    waiting = {n["id"]: n for n in research(project) if n["frame"] or n["state"] in ("failed", "error")}
+    waiting = {n["id"]: n for n in research(project) if n["frame"] or n["state"] in ("error", "waiting", "unchecked") or (n["state"] == "failed" and n["gates"][n["at"]].get("verdict") != "known")}
     where = {"folder": data["cwd"]} if isinstance(data.get("cwd"), str) and data["cwd"] else {}  # where the round's artifacts are
     for section, kind_, status_ in (("results", "conclusion", "supported"), ("ruled out", "observation", "contradicted"), ("leads", "hypothesis", "open")):
         for line in parts[section]:
@@ -451,23 +457,35 @@ def add_frames(data):
     return {"added": added, "skipped": len(given) - len(added)}
 
 
-def gates_pending(project):
+def working(project):
+    """The agents with a loop running on this project now."""
+    with LOCK:
+        mine = {a for (p, a), r in RUNNING.items() if p == project and r["proc"].poll() is None}
+    return mine | {a for a in worked(project) if a not in mine and orphan(project, a)}
+
+
+def gates_pending(project, agent=""):
     """What the loop should run next: for each live claim, the first gate it has no current verdict from, the person's
-    marks first and then the oldest. A claim a gate stopped waits there until it is claimed again."""
+    marks first, then the claim with the most gates behind it, then the oldest. A claim a gate stopped waits there until it is claimed again.
+    With several loops side by side, each runs the gates on its own agent's claims, so no gate is run twice."""
+    live = working(project)
+    others, first = live - {agent}, min(live | {agent})  # a claim whose own loop is gone falls to one loop, not to all of them
     cfg = config(check_name(project))
-    gates, root, seal = {g["name"]: g for g in gates_of(cfg)}, str((PROJECTS / project).resolve()), fingerprint(project, cfg)
+    gates, root = {g["name"]: g for g in sealed(project, cfg)}, str((PROJECTS / project).resolve())
     threads = research(project)
     settled = [n for n in threads if n["state"] == "established"]
-    due = [n for n in threads if n["state"] == "waiting" and n.get("status") not in ("contradicted", "superseded")]
+    due = [n for n in threads if (n["state"] == "waiting" or n.get("rate")) and n.get("status") not in ("contradicted", "superseded") and n.get("agent") not in others
+           and (n.get("agent") == agent or n.get("agent") in live or agent == first)]
     out = []
-    for n in sorted(due, key=lambda n: (-n["priority"], n["born"])):
-        gate = gates[n["at"]]
+    # Nearest to established first: finishing one claim is worth more than starting on three. Rating comes after all of it.
+    for n in sorted(due, key=lambda n: (bool(n.get("rate")), -n["priority"], -n["standing"], n["born"])):
+        gate = gates[n["at"] or n["rate"]]
         out.append({"id": n["id"], "artifact": n.get("artifact") or "", "text": n.get("text", ""), "gate": gate["name"], "timeout_min": gate["timeout_min"],
-                    "fp": seal, "cwd": n.get("folder") or "",  # the question it runs under, and the folder its artifact was left in
+                    "fp": gate["fp"], "cwd": n.get("folder") or "",  # the question it runs under, and the folder its artifact was left in
                     **({"command": [part.replace("{project}", root) for part in gate["command"]]} if "command" in gate else
                        {"brief": refuter_brief(cfg, n, gate, [x for x in settled if x is not n]) if "refute" in gate else rater_brief(cfg, n, gate),
                         "kind": "refute" if "refute" in gate else "rate", **other_harness(gate)})})
-    return {"pending": out[:20]}
+    return {"pending": out}
 
 
 def refuter_brief(cfg, n, gate, settled=()):
@@ -519,28 +537,32 @@ def rater_brief(cfg, n, gate):
         "Rating: <1 to 5> - <the reason, in a sentence>"]) + "\n"
 
 
-def assess(n, gates, seal):
-    """Where a claim stands against the gates: how many it has passed in order, and what is stopping it."""
+def assess(n, gates):
+    """Where a claim stands against the gates: how many it is through in order ("standing"), and what is stopping it.
+    A rater stops nothing: a claim through every other gate is established, and "rate" names the rater still due on it."""
     if not gates or n.get("status") not in ("supported", "reproduced"):  # a frame or a dead end is not a claim
-        return {"standing": 0, "state": None, "at": None}
+        return {"standing": 0, "state": None, "at": None, "rate": None}
     for count, gate in enumerate(gates):
-        if "command" in gate and not n.get("artifact"):  # a command has to be run on something; a refuter can work from the claim
-            return {"standing": count, "state": "unchecked", "at": gate["name"]}
         got = (n.get("gates") or {}).get(gate["name"])
-        if not got or got.get("fp") != seal or (got.get("checked") or "") != (n.get("artifact") or ""):  # never run, or run on a different question or artifact
-            return {"standing": count, "state": "waiting", "at": gate["name"]}
-        if got.get("verdict") == "error" and (got.get("tries") or 1) < GATE_TRIES:  # a timeout or a harness hiccup is not the claim's fault: it runs again
-            return {"standing": count, "state": "waiting", "at": gate["name"]}
+        again = not got or got.get("fp") != gate["fp"] or (got.get("checked") or "") != (n.get("artifact") or "")  # never run, or run on a different question or artifact
+        again = again or got.get("verdict") == "error" and (got.get("tries") or 1) < GATE_TRIES  # a timeout or a harness hiccup is not the claim's fault: it runs again
+        if "rate" in gate:
+            if again:
+                return {"standing": count, "state": "established", "at": None, "rate": gate["name"]}
+            continue
+        if "command" in gate and not n.get("artifact"):  # a command has to be run on something; a refuter can work from the claim
+            return {"standing": count, "state": "unchecked", "at": gate["name"], "rate": None}
+        if again:
+            return {"standing": count, "state": "waiting", "at": gate["name"], "rate": None}
         if got.get("verdict") != "passed":
-            return {"standing": count, "state": "failed" if got.get("verdict") in ("failed", "known") else "error", "at": gate["name"]}
-    return {"standing": len(gates), "state": "established", "at": None}
+            return {"standing": count, "state": "failed" if got.get("verdict") in ("failed", "known") else "error", "at": gate["name"], "rate": None}
+    return {"standing": len(gates), "state": "established", "at": None, "rate": None}
 
 
 def queue(claims):
-    """The frames the loop will take, in order: the person's marks first, then whatever is furthest through the gates
-    (a claim stopped at its first gate is no further along than a fresh frame), then the highest score, then the oldest.
+    """The frames the loop will take, in order: the person's marks first, then the highest score, then the oldest.
     A frame whose rounds are spent is not in it."""
-    return sorted((n for n in claims if n["frame"] and not n["stalled"]), key=lambda n: (-n["priority"], -n["standing"], -n["budget"], n["born"]))
+    return sorted((n for n in claims if n["frame"] and not n["stalled"]), key=lambda n: (-n["priority"], -n["budget"], n["born"]))
 
 
 def merged(events, type):
@@ -566,7 +588,7 @@ def research(project, query="", area=""):
     settles it; then it is a claim, or ruled out. Each comes back with where it stands: against the gates ("standing",
     "state", "at"), as work ("frame", "attempts", "budget", "stalled"), and whether the person's audit still holds."""
     cfg = config(check_name(project))
-    gates, seal = gates_of(cfg), fingerprint(project, cfg)
+    gates, seal = sealed(project, cfg), fingerprint(project, cfg)
     nodes, attempts = {}, {}
     for i, e in enumerate(load(project)):
         if e["type"] == "activity" and isinstance(e.get("data"), dict) and isinstance(e["data"].get("frame"), str) and STARTED.match(e.get("text") or ""):
@@ -588,21 +610,25 @@ def research(project, query="", area=""):
                     if e.get("priority") is True:
                         attempts[e["id"]] = 0  # Pursue puts it at the front with its rounds to spend again
                 continue
-            # Claimed again (an artifact named, even the same one) or reworded: a different claim, so every gate and the audit are still to come.
-            fresh = "artifact" in e or bool(e.get("text") and old.get("text") and plain(e["text"]) != plain(old["text"]))
+            # Claimed again with another artifact, reworded, or claimed again after a gate said no: a different claim, so every gate
+            # and the audit are still to come. Saying the same thing about the same artifact changes nothing.
+            fresh = ("artifact" in e and ((e["artifact"] or "") != (old.get("artifact") or "") or any(g.get("verdict") != "passed" for g in old.get("gates", {}).values()))
+                     or bool(e.get("text") and old.get("text") and plain(e["text"]) != plain(old["text"])))
             kept = {k: v for k, v in old.items() if k not in ("gates", "audited", "audit_fp", "audit_artifact")} if fresh else old
             nodes[e["id"]] = {**kept, **e, "_i": i, "born": old.get("born", i), "history": [*old.get("history", []), update]}
     out = list(nodes.values())
     for n in out:
         n["priority"] = bool(n.get("priority"))
-        n.update(assess(n, gates, seal))
+        n.update(assess(n, gates))
         n["audited"] = bool(n.get("audited")) and n.get("audit_fp") == seal and n.get("audit_artifact", "") == (n.get("artifact") or "")
         n["attempts"], n["budget"] = attempts.get(n["id"], 0), n["score"] if isinstance(n.get("score"), int) else 3
-        rated = [(n.get("gates") or {}).get(g["name"]) or {} for g in gates if "rate" in g]  # how much an established claim matters, by the rater's word
-        n["rating"] = next((r["rating"] for r in rated if r.get("fp") == seal and (r.get("checked") or "") == (n.get("artifact") or "") and r.get("rating")), None) if n["state"] == "established" else None
+        rated = [{**((n.get("gates") or {}).get(g["name"]) or {}), "of": g["fp"]} for g in gates if "rate" in g]  # how much an established claim matters, by the rater's word
+        n["rating"] = next((r["rating"] for r in rated if r.get("fp") == r["of"] and (r.get("checked") or "") == (n.get("artifact") or "") and r.get("rating")), None) if n["state"] == "established" else None
         settled = n.get("status") in ("contradicted", "superseded")
         known = n["state"] == "failed" and ((n.get("gates") or {}).get(n["at"]) or {}).get("verdict") == "known"  # nothing a round can repair
-        n["frame"] = not settled and (n.get("status") == "open" or (n["state"] == "failed" and not known) or (n["priority"] and n["state"] == "unchecked"))
+        # A claim a gate stopped is not queued: in the real runs every round sent back to one only agreed with the gate. It stays
+        # in the brief, where any round may repair it; the person's mark is what gives it a round of its own.
+        n["frame"] = not settled and (n.get("status") == "open" or (n["priority"] and (n["state"] == "unchecked" or (n["state"] == "failed" and not known))))
         n["stalled"] = n["frame"] and n["attempts"] >= n["budget"]
     if area:
         out = [n for n in out if n.get("area") == area]
@@ -701,7 +727,7 @@ def model_flag(command):
     return None
 
 
-LOOP_DEFAULTS = {"rounds": 4, "timeout_min": 0, "reply_wait": 120, "keep_background": False, "tools": "recipe"}  # research: no time limit
+LOOP_DEFAULTS = {"rounds": 4, "timeout_min": 0, "reply_wait": 120, "keep_background": False, "tools": "recipe", "workers": 1}  # research: no time limit
 WIDE_TOOLS = ["WebSearch", "WebFetch", "Task", "Agent"]  # web and subagents, by name: permission checks stay on and connectors stay refused
 LOOP_RULES = {  # what each loop setting may be, and how to say so when it is not
     "recipe": (lambda v: isinstance(v, str) and bool(NAME.match(v)), "a recipe name from launchers.json"),
@@ -710,6 +736,7 @@ LOOP_RULES = {  # what each loop setting may be, and how to say so when it is no
     "timeout_min": (lambda v: isinstance(v, (int, float)) and not isinstance(v, bool) and 0 <= v <= 1440, "minutes from 0 (no limit) to 1440"),
     "reply_wait": (lambda v: isinstance(v, int) and not isinstance(v, bool) and 0 <= v <= 3600, "whole seconds from 0 (never wait) to 3600"),
     "keep_background": (lambda v: isinstance(v, bool), "true or false"),
+    "workers": (lambda v: isinstance(v, int) and not isinstance(v, bool) and 1 <= v <= 4, "a whole number from 1 to 4: how many rounds run side by side, each on its own frame and in its own folder"),
     "tools": (lambda v: v in ("recipe", "wide"), '"recipe" (the recipe\'s own list) or "wide" (also web search, web fetch and subagents)'),
 }
 
@@ -863,49 +890,52 @@ def launch(data):
     program = resolve_program(base)  # "claude" may be claude.cmd on Windows; the loop gets the path that will start
     from scripts.loop import can_converse  # a direct `claude -p` round can be watched and messaged while it runs
     interactive = recipe.get("interactive") is not False and can_converse(base)
-    agent = f"{name}-1"  # the name its round notes are kept under, so a later launch of the same recipe remembers them
+    # Each worker is a loop of its own, named for the notes and the folder it keeps, so a later launch of the same recipe remembers
+    # them. Side by side they share the record and nothing else: each takes a different frame and runs the gates on its own claims.
+    agents = [f"{name}-{i + 1}" for i in range(settings["workers"])]
     with LOCK:
         alive = [k for k, r in RUNNING.items() if r["proc"].poll() is None]
         working = [a for (p, a) in alive if p == project] or [a for a in worked(project) if orphan(project, a)]
-        if working:  # two loops on one project would share a folder, a log and a brief
+        if working:
             raise ValueError(f"a loop is already running on this project ({working[0]}); stop it first")
-        if len(alive) >= MAX_RUNNING:
+        if len(alive) + len(agents) > MAX_RUNNING:
             raise ValueError(f"at most {MAX_RUNNING} loops may run at once; {len(alive)} are running")
-        work = ROOT / "agent-work" / project / agent
-        fresh = not work.exists()
-        work.mkdir(parents=True, exist_ok=True)
-        seed = config(project).get("agent_files")
-        if fresh and seed and Path(seed).is_dir():  # what the agent starts with: a copy of the target, a spec
-            shutil.copytree(seed, work, dirs_exist_ok=True)
-        env = {k: v for k, v in os.environ.items() if k not in ("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT")}
-        env["PROJECT_VIEW_URL"] = f"http://127.0.0.1:{PORT}"
-        command = [sys.executable, str(ROOT / "scripts" / "loop.py"), project, "--agent", agent, "--harness", str(recipe.get("label") or name),
-                   "--max-iterations", str(rounds), "--timeout-min", f'{settings["timeout_min"]:g}', "--reply-wait", str(settings["reply_wait"]),
-                   *(["--keep-background"] if settings["keep_background"] else []), *(["--interactive"] if interactive else []), "--"] + program
-        session = uuid.uuid4().hex
-        env["HADES_LAUNCH_SESSION"] = session
-        env["HADES_DETAILS_DB"] = str((ROOT / "agent-work" / ".hades" / "invocations.sqlite3").resolve())
-        with open(work / "loop.log", "ab") as log:
-            console = open(work / "loop.log", "rb")
-            try:
-                if not os.path.samestat(os.fstat(log.fileno()), os.fstat(console.fileno())):
-                    raise OSError("terminal log changed while opening it")
-                start_offset = console.seek(0, os.SEEK_END)
-                proc = subprocess.Popen(command, cwd=work, env=env, stdin=subprocess.PIPE if interactive else subprocess.DEVNULL,
-                                        stdout=log, stderr=subprocess.STDOUT, **own_group())
-            except BaseException:
-                console.close()
-                raise
-        if interactive and not WINDOWS:
-            os.set_blocking(proc.stdin.fileno(), False)  # a worker that stops reading must not stall the server; tell() waits with a deadline
-        (work / "loop.pid").write_text(f"{proc.pid}\n")  # survives a restart of this server, so the loop can still be found
-        previous = RUNNING.get((project, agent))
-        if previous:
-            previous["console"].close()
-        RUNNING[(project, agent)] = {"proc": proc, "recipe": name, "session": session, "console": console, "interactive": interactive, "pipe": threading.Lock(),
-                                     "model": settings["model"], "settings": settings,
-                                     "start_offset": start_offset, "started": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")}
-    return {"started": [agent], "rounds": rounds, "recipe": name, "model": settings["model"], "settings": settings}
+        for agent in agents:
+            work = ROOT / "agent-work" / project / agent
+            fresh = not work.exists()
+            work.mkdir(parents=True, exist_ok=True)
+            seed = config(project).get("agent_files")
+            if fresh and seed and Path(seed).is_dir():  # what the agent starts with: a copy of the target, a spec
+                shutil.copytree(seed, work, dirs_exist_ok=True)
+            env = {k: v for k, v in os.environ.items() if k not in ("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT")}
+            env["PROJECT_VIEW_URL"] = f"http://127.0.0.1:{PORT}"
+            command = [sys.executable, str(ROOT / "scripts" / "loop.py"), project, "--agent", agent, "--harness", str(recipe.get("label") or name),
+                       "--max-iterations", str(rounds), "--timeout-min", f'{settings["timeout_min"]:g}', "--reply-wait", str(settings["reply_wait"]),
+                       *(["--keep-background"] if settings["keep_background"] else []), *(["--interactive"] if interactive else []), "--"] + program
+            session = uuid.uuid4().hex
+            env["HADES_LAUNCH_SESSION"] = session
+            env["HADES_DETAILS_DB"] = str((ROOT / "agent-work" / ".hades" / "invocations.sqlite3").resolve())
+            with open(work / "loop.log", "ab") as log:
+                console = open(work / "loop.log", "rb")
+                try:
+                    if not os.path.samestat(os.fstat(log.fileno()), os.fstat(console.fileno())):
+                        raise OSError("terminal log changed while opening it")
+                    start_offset = console.seek(0, os.SEEK_END)
+                    proc = subprocess.Popen(command, cwd=work, env=env, stdin=subprocess.PIPE if interactive else subprocess.DEVNULL,
+                                            stdout=log, stderr=subprocess.STDOUT, **own_group())
+                except BaseException:
+                    console.close()
+                    raise
+            if interactive and not WINDOWS:
+                os.set_blocking(proc.stdin.fileno(), False)  # a worker that stops reading must not stall the server; tell() waits with a deadline
+            (work / "loop.pid").write_text(f"{proc.pid}\n")  # survives a restart of this server, so the loop can still be found
+            previous = RUNNING.get((project, agent))
+            if previous:
+                previous["console"].close()
+            RUNNING[(project, agent)] = {"proc": proc, "recipe": name, "session": session, "console": console, "interactive": interactive, "pipe": threading.Lock(),
+                                         "model": settings["model"], "settings": settings,
+                                         "start_offset": start_offset, "started": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")}
+    return {"started": agents, "rounds": rounds, "recipe": name, "model": settings["model"], "settings": settings}
 
 
 # ---------- the few things processes do differently on Windows, kept small so each can be checked on its own ----------
@@ -1172,7 +1202,23 @@ def shown(command):
     return subprocess.list2cmdline(command) if WINDOWS else shlex.join(command)
 
 
-def plan(project, agent):
+HELD = {}  # (project, frame id) -> (agent, when): a frame just handed to a loop, until its round is seen to start
+
+
+def in_flight(project, events, agent):
+    """The frames other loops are on right now, so two rounds side by side never take the same one."""
+    on = {}
+    for e in events:
+        if e["type"] == "activity" and e.get("agent"):
+            if STARTED.match(e.get("text") or ""):
+                on[e["agent"]] = (e.get("data") or {}).get("frame") if isinstance(e.get("data"), dict) else None
+            elif re.match(r"Iteration \d+ (finished|ended badly)|Loop stopped", e.get("text") or ""):
+                on.pop(e["agent"], None)
+    busy = {f for a, f in on.items() if f and a != agent and a in working(project)}
+    return busy | {f for (p, f), (a, when) in list(HELD.items()) if p == project and a != agent and time.time() - when < 120}
+
+
+def plan(project, agent, hold=False):
     """(the brief, the id of the frame it gives the round or None). The model does the research; the harness keeps the
     record from its closing handoff, so every line here is about the work."""
     cfg, events = config(check_name(project)), list(load(project))
@@ -1183,28 +1229,27 @@ def plan(project, agent):
              for n in claims if n.get("status") == "contradicted"][:20]
     live = [n for n in claims if n.get("status") not in ("contradicted", "superseded")]
     line = queue(claims)
-    frame = line[0] if line else None  # while there is a frame, the round settles it; when there is none, the round widens
+    busy = in_flight(project, events, agent)
+    frame = next((n for n in line if n["id"] not in busy), None)  # while there is a free frame, the round settles it; when there is none, the round widens
+    if frame and hold:
+        HELD[(project, frame["id"])] = (agent, time.time())
     # The closing note is the round's memory of its last round. On a different frame it would pull this round off its own.
     before = (notes[-1].get("data") or {}).get("frame") if notes and isinstance(notes[-1].get("data"), dict) else None
-    recall = notes and (not frame or before in (None, frame["id"]))
+    recall = notes and (before is None or before == (frame["id"] if frame else None))  # a note about a different frame would pull this round off its own
     if gates:
         root, hint = str((PROJECTS / project).resolve()), str(cfg.get("artifact") or "").strip()[:300]
-        commands = [g for g in gates if "command" in g]
-        rule = [f"A RESULT COUNTS ONLY WHEN IT PASSES {'THE GATES, in this order' if len(gates) > 1 else 'THE GATE'}: " + ", ".join(g["name"] for g in gates) + ".",
-                "- They are run for you after the round, on every Results line. End a line with [check: <artifact>] to name what should be checked"
+        commands, stops, rounds = [g for g in gates if "command" in g], [g for g in gates if "rate" not in g], [g for g in gates if "command" not in g]
+        rule = [f"A RESULT COUNTS ONLY WHEN IT PASSES {'THE GATES, in this order' if len(stops) > 1 else 'THE GATE'}: " + ", ".join(g["name"] for g in stops) + ".",
+                "- They run after the round, on every Results line. End a line with [check: <artifact>] to name what should be checked"
                 + (f": {hint}" if hint else "") + "." + (" A command gate cannot run without one." if commands else ""),
                 *[f'- {g["name"]}: ' + (shown([part.replace("{project}", root) for part in g["command"]]) + ("" if any("{artifact}" in part for part in g["command"]) else " <artifact>")
-                                        if "command" in g else "a separate round that sees only your claim and tries to refute it. It is told: " + g["refute"][:500] if "refute" in g
+                                        if "command" in g else "a separate round that sees only your claim and tries to refute it. It is told: " + g["refute"] if "refute" in g
                                         else "a separate round that says how much the result matters, from 1 to 5. It is told: " + g["rate"][:300]) for g in gates],
-                *(["- You may run a gate's command yourself while you work."] if commands else []),
-                "- Whoever checks a result sees its Results line and its artifact, and nothing else from this round. Write the line so it stands on its own, "
-                "and make the artifact self-contained: the input, the exact command that shows the result, and the output to expect.",
-                "- Each Results line costs a full checking round. Claim only what you ran and saw yourself; anything less is a Lead.",
-                "- Never edit the gates or what they read. If you think one is wrong, say so in your Handoff and work on something else."]
+                "- A checker sees the Results line and its artifact, and nothing else from this round."
+                + (" Each line costs " + ("a full checking round." if len(rounds) == 1 else f"up to {len(rounds)} full checking rounds.") if rounds else ""),
+                "- The gates and what they read are not yours to edit. If one looks wrong, say so in your Handoff."]
     else:
         rule = ["Nothing re-checks your results, so every result you report is a claim. Say what you observed and how to see it again."]
-    leads = ("End your handoff with a Leads: line per lead worth chasing, most promising first, each with the quickest test that would confirm or kill it "
-             "and a score: [score: 4] you saw direct evidence and one round can likely settle it, [score: 3] plausible but untested, [score: 1] a long shot.")
     out = [*steering(cfg, events),
            *(["YOUR CLOSING NOTE FROM YOUR LAST ROUND (your only memory of it)", notes[-1]["body"][-2000:], ""] if recall else []),
            *[f"{k.upper()}: {cfg[k]}" for k in ("target", "goal", "rules") if isinstance(cfg.get(k), str) and cfg[k].strip()],
@@ -1212,17 +1257,12 @@ def plan(project, agent):
              ["GOAL: none yet. Work from the direction above."] if str(cfg.get("direction") or "").strip() else
              ["GOAL: none yet. Do not invent work: say in your handoff that the project has no goal, and stop."]),
            "",
-           *(["Settle one frame this round. Your closing handoff is recorded on the dashboard for you; report nothing else.",
-              "- The frame is named at the end of this brief. Read what was already tried, below, first."]
-             if frame else
-             ["Follow your nose this round: nothing is queued, so find the places worth looking. Your closing handoff is recorded on the dashboard for you; report nothing else.",
-              "- Go where the target looks most surprising, broken or unexplained, and keep following what you find rather than finishing a plan.",
-              "- Breadth beats proof this round: a quick look at several things is worth more than settling one.",
-              "- Run things in parallel where you can (background jobs, subagents if you have them).",
-              "- Do not spend the round gathering evidence for what you already believe. The ruled-out list below is dead ground.",
-              "- " + leads]),
-           *(["- When a Results or Ruled out line settles a thread listed below, start that line with the thread's id in brackets, like [k12]."] if live else []),
-           "- Nobody is watching this round. If something only the person could decide comes up, do not wait: take the cautious option, say what you assumed on the Assumed line, and carry on.",
+           # What the round is for, and nothing about how: the model does the research.
+           "This round has one frame to settle, named at the end of this brief." if frame else
+           "Nothing is queued, so this round is yours: find what is worth finding, however you see fit. What you do not get to goes on Leads lines.",
+           *(["A Results or Ruled out line that settles a thread listed below starts with its id in brackets, like [k12]."] if live else []),
+           "Nobody is watching. Where only the person could decide, take the cautious option and say so on the Assumed line.",
+           "",
            *rule]
     questions = [q for q in merged(events, "question").values() if q["asker"] != "you"]
     words = {}  # the answer arrives as a later event without the question's text, so take the text from where it was asked
@@ -1254,6 +1294,11 @@ def plan(project, agent):
         out += ["", f"ESTABLISHED (passed {'every gate' if len(gates) > 1 else 'the gate'}: build on these, do not redo them)",
                 *[f'- [{n["id"]}] {n.get("text", "")[:300]}' + (f' (artifact: {n["artifact"]})' if n.get("artifact") else "") + (f' (rated {n["rating"]} of 5)' if n["rating"] else "") for n in established[:20]]]
     stopped = sorted((n for n in live if n["state"] in ("failed", "error") and n is not frame), key=lambda n: -n["standing"])
+    old = [n for n in stopped if n["gates"][n["at"]].get("verdict") == "known"]  # nothing to repair: one line each, so no round finds them a second time
+    stopped = [n for n in stopped if n not in old]
+    if old:
+        out += ["", "ALREADY KNOWN (a gate found each reported elsewhere: do not claim them again, in these or other words)",
+                *[f'- [{n["id"]}] {n.get("text", "")[:200]}' for n in old[:30]]]
     if stopped:
         out += ["", "CLAIMED, BUT STOPPED AT A GATE" + (" (for context: not this round's work)" if frame else " (to repair one, claim it again starting the Results line with its id; or rule it out)")]
         for n in stopped[:8]:
@@ -1272,13 +1317,11 @@ def plan(project, agent):
                 *thread_lines(frame),
                 *([f"It is a claim that a gate stopped. Answer what the gate said:", *halted(frame, ""),
                    "If the gate showed it is already known or that it cannot be made to happen, rule it out; do not reword it and claim it again."]
-                  if frame["state"] == "failed" else
-                  ["Try hard to make this frame pay off. Claim only what you ran and saw yourself."] if gates else []),
-                "Settle it this round, one way or the other:",
+                  if frame["state"] == "failed" else []),
+                "Settle it one way or the other:",
                 f"- a Results line that starts with {mark}" + (" and ends with [check: <artifact>], or" if gates else ", or"),
-                f"- a Ruled out line that starts with {mark} and says what you examined and why it is not there, so the ground is not covered twice.",
-                "If you cannot settle it, say what blocked you, and make your Next line the quickest test for this same frame.",
-                "A new place to look goes on a Leads line; do not go after it this round."]
+                f"- a Ruled out line that starts with {mark} and says what you examined and why it is not there.",
+                "If you cannot, say what blocked you and make Next the quickest test for this same frame. Other places to look go on Leads lines."]
     return "\n".join(out) + "\n", frame["id"] if frame else None
 
 
@@ -1313,14 +1356,14 @@ def status(project, base):
            "Goal: " + (str(cfg.get("goal") or "").strip() or "none set"),
            *(["Direction: " + cfg["direction"].strip()[:400]] if isinstance(cfg.get("direction"), str) and cfg["direction"].strip() else []),
            "Loop: " + ("paused by the person; " if cfg.get("paused") else "")
-           + (f'running as {alive["agent"]} ({alive["recipe"]}' + (f', {alive["model"]}' if alive.get("model") else "") + f'), up to {alive["settings"].get("rounds") or "unlimited"} rounds' if alive else
+           + (f'running as {", ".join(r["agent"] for r in runs if r["alive"])} ({alive["recipe"]}' + (f', {alive["model"]}' if alive.get("model") else "") + f'), up to {alive["settings"].get("rounds") or "unlimited"} rounds' if alive else
               "not running" + (f' ({stopped["text"]}, {ago(stopped.get("ts"))})' if stopped else "")),
            *([doing] if doing else []),
            *(["PROBLEM: " + config_problem(project) + ". The loop holds until it is fixed."] if config_problem(project) else []),
            "Gates: " + (" -> ".join(g["name"] + (" (refuter" if "refute" in g else " (rater" if "rate" in g else "") + (f', on {g["recipe"]}' if g.get("recipe") else "") + (")" if "command" not in g else "") for g in gates) + (" [built in; the project set none]" if "gates" not in cfg else "")
                         if gates else "none: every result is only a claim"),
            f'Spent: {sum(1 for _, e in marks if STARTED.match(e["text"]))} research rounds and '
-           f'{sum(1 for e in events if e["type"] == "research" and e.get("source") == "gate" and "refute" in gate_by.get(e.get("gate"), {}))} refuter rounds, for {len(by("established"))} established.',
+           f'{sum(1 for e in events if e["type"] == "research" and e.get("source") == "gate" and "command" not in gate_by.get(e.get("gate"), {"command": 1}))} checking rounds (refuters and raters), for {len(by("established"))} established.',
            f'Counts: {len(by("established"))} established, {len(by("failed")) + len(by("error"))} stopped at a gate, {len(by("waiting"))} waiting for a gate, '
            f'{len([n for n in live if n.get("status") in ("supported", "reproduced") and n["state"] in (None, "unchecked")])} claimed and unchecked, '
            f'{len([n for n in claims if n.get("status") == "contradicted"])} ruled out, {len(line)} queued, {len([n for n in live if n["stalled"]])} set aside']
@@ -1335,7 +1378,7 @@ def status(project, base):
             got = n["gates"][n["at"]]
             said = (got.get("detail") or "").strip().splitlines()
             word = "could not run" if n["state"] == "error" else "says it is already known (it is not queued again)" if got.get("verdict") == "known" else "said no"
-            out += [title(n), f'  passed {n["standing"]} of {len(gates)}; {n["at"]} {word}' + (f': {said[-1][:240]}' if said else "")]
+            out += [title(n), f'  passed {n["standing"]} of {len([g for g in gates if "rate" not in g])}; {n["at"]} {word}' + (f': {said[-1][:240]}' if said else "")]
     for heading, some in (("WAITING FOR A GATE (it runs after the next round)", by("waiting")),
                           ("CLAIMED AND UNCHECKED (a round's word; no gate could run on it)", [n for n in live if n.get("status") in ("supported", "reproduced") and n["state"] in (None, "unchecked")])):
         out += ["", heading, *[title(n) + (f' (at {n["at"]})' if n.get("at") else "") + (" (marked by the person)" if n["priority"] else "") for n in some[:8]],
@@ -1430,11 +1473,11 @@ class Handler(BaseHTTPRequestHandler):
                     f'{p}: {(config(p).get("goal") or "no goal")[:100]}   {base}/api/status?project={p}\n' for p in project_ids()) or "No projects yet.\n"
                 self.reply(200, text.encode(), "text/plain; charset=utf-8")
             elif url.path == "/api/gates":
-                self.reply(200, gates_pending(arg("project")))
+                self.reply(200, gates_pending(arg("project"), arg("agent")[:80]))
             elif url.path == "/api/research":
                 self.reply(200, research(arg("project"), arg("q"), arg("area")))
             elif url.path == "/api/brief":
-                text, frame = plan(arg("project"), arg("agent")[:80])
+                text, frame = plan(arg("project"), arg("agent")[:80], hold=arg("as") == "json")
                 if arg("as") == "json":  # the loop asks this way, to learn which frame its round was given
                     return self.reply(200, {"brief": text, "frame": frame})
                 self.reply(200, text.encode(), "text/plain; charset=utf-8")

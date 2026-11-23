@@ -73,8 +73,7 @@ order a claim must pass them.
 
 **You do not have to set any up.** A project with no `gates` of its own gets one built in, called `refutation`: after
 each round, a fresh round is shown only the claim and told to make it fail three ways (make it happen again, hold it
-against the goal as stated, find where it was already reported). It costs one extra round per claim, at most four per
-research round, and it is the weakest kind of gate. `"gates": []` turns gating off.
+against the goal as stated, find where it was already reported). It costs one extra round per claim, and it is the weakest kind of gate. `"gates": []` turns gating off.
 
 For stronger checking, add your own to the project's `project.json`, or ask Claude to write them. The API cannot set
 them, so a round cannot change them through the server.
@@ -105,7 +104,8 @@ A gate is one of three things.
 
 - **A rater.** Written with `"rate"` in place of `"refute"`. A fresh round is shown a claim that has passed everything
   before it and says how much it matters, ending `Rating: <1 to 5> - <why>`. A rater never stops a claim. Its number
-  orders what is established, on the page, in the digest and in the brief. Put it last. It is told to argue the result
+  orders what is established, on the page, in the digest and in the brief. A claim is established once it is through
+  the other gates, rated or not, and raters run after everything else, wherever you wrote them. It is told to argue the result
   down first, because whoever finds a result overrates it; it is still a model's opinion, and your audit outranks it.
 
 A refuter or a rater may add `"recipe": "<name from launchers.json>"` to run on a different agent from the one doing the
@@ -124,13 +124,22 @@ How a claim moves:
   pass makes the next gate due. The first gate that fails stops the claim there. The agent never reports its own
   verdict. A verdict counts only for the artifact the claim names now.
 - The last of each gate's output is kept on the thread.
-- A claim that a gate stopped becomes work again. The next brief shows what the gate said, and a round can repair it and
-  claim it again by its id, which runs every gate again on the new artifact, or rule it out.
+- A claim that a gate stopped is listed in every brief with what the gate said. Any round may repair it and claim it
+  again by its id, which runs every gate again, or rule it out. It gets a round of its own only if you press Pursue: in
+  the first real runs, every round sent back to argue with a gate only agreed with it.
+
+**Which gates run when.** Every gate that is due runs after each research round, so the next round's brief carries the
+verdicts on what the last one claimed. A rating waits until nothing else is due. A refuter or a rater is a whole round
+of a model, so a result costs up to one round per such gate: put the gate that rejects most first among those of the
+same cost (on a well-studied target that is usually the search for an earlier report), and make a check a command
+whenever a program can decide it.
 
 **Verdicts are bound to the question.** `lock` names files in the project's folder: the exact statement of what you are
-asking, the scope, a gate's own script. Every verdict is stamped with a fingerprint of the gates and those files. Change
-any of them and every earlier verdict is stale: it counts for nothing, the page shows the gate as due again, and the
-loop reruns it after the next round. A gate that was running while you changed them is thrown away and run again. So
+asking, the scope, a gate's own script. Every verdict is stamped with a fingerprint of its own gate and those files.
+Reword a gate and that gate's verdicts are stale; change a locked file and every verdict is. A gate's time limit is not
+part of its fingerprint. A stale verdict counts for
+nothing, the page shows the gate as due again, and the loop reruns it after the next round. Adding a gate or changing
+their order leaves the other gates' verdicts standing. A gate that was running while you changed them is thrown away and run again. So
 you can sharpen the question without old passes surviving it. Rewording a claim does the same to that claim.
 
 **Your audit.** On any claim, **Mark as audited** records that you looked at it yourself. It lapses when the claim's
@@ -223,7 +232,7 @@ choose which a project uses in its Settings.
 Any program that takes a prompt on standard input or as a file works the same way, refuter gates included. Each entry is a named recipe (see "Changing the
 harness" in `AGENTS.md`). The file is read again at every launch.
 
-A project runs one loop at a time: Start is refused while one is alive, and Stop ends the loop and everything its round
+A project runs one launch at a time (of one or more workers): Start is refused while one is alive, and Stop ends the loop and everything its round
 started. The loop works in `agent-work/<project>/<recipe>-1/`, where `loop.log` holds its output. A project can name a
 folder (`agent_files`) that a new working folder starts with a copy of. `loop.pid` there lets a restarted server find a
 loop it started before, so it can still be stopped.
@@ -238,10 +247,17 @@ field of the same name, else the default.
 | `recipe` | a recipe name from `launchers.json` | the only recipe, if there is one |
 | `model` | a model name for the recipe's command | the recipe's own |
 | `rounds` | 0 (until stopped) to 500 | 4 |
+| `workers` | 1 to 4: how many rounds run side by side | 1 |
 | `timeout_min` | minutes per round, 0 (no limit) to 1440 | 0: research rounds run as long as they need |
 | `reply_wait` | seconds a round stays open for your reply once you have spoken, 0 to 3600 | 120 |
 | `keep_background` | true leaves processes the agent started running after a round | false |
 | `tools` | `recipe` uses the recipe's own allow-list; `wide` also allows web search, web fetch and subagents (Claude Code recipes only) | `recipe` |
+
+With `workers` above 1, a launch starts that many loops of the same recipe (`<recipe>-1`, `<recipe>-2`, …). They share the
+record and nothing else: each has its own folder and its own memory of its last round, each is given a different frame
+from the queue (or looks for new places when none is free), and each runs the gates on its own claims. Each runs the
+full number of `rounds`, so two workers spend twice the usage in the same time. Stop ends all of them. Hades has no
+clock of its own: to run more at night, have Claude or a scheduler send the launch then.
 
 `wide` adds those tools to the allow-list by name. Permission checks stay on, so connectors and anything else not named
 stay refused. To go further, edit the recipe's `command` in `launchers.json`.

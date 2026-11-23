@@ -138,7 +138,7 @@ def check():
                                                          {"name": "not known", "refute": "Look for an earlier report of this fault. Cite it if you find one."},
                                                          {"name": "matters", "rate": "How much would a maintainer care?"}]}))
         text = http("/api/brief?project=self-check-gated&agent=self-check")
-        need("PASSES THE GATES, in this order: reproduces, not known, matters" in text and "[check: <artifact>]" in text, "the brief does not explain the gates")
+        need("PASSES THE GATES, in this order: reproduces, not known." in text and "- matters: a separate round that says how much" in text and "[check: <artifact>]" in text, "the brief does not explain the gates")
         # one stand-in for both kinds of round: a research round claims three results and a lead; a refuter round kills one claim
         (tmp / "standin.py").write_text("import sys\nbrief = sys.stdin.read()\nif 'Rating: <' in brief:\n    print('Rating: 4 - a remote fault in a default build')\n    sys.exit(0)\nif 'Verdict:' in brief:\n"
             "    print('Verdict: refuted - reported upstream as issue 12' if 'footer' in brief else 'Verdict: stands - searched the tracker and the changelog')\n"
@@ -156,8 +156,8 @@ def check():
         need(now["The length field overflows"]["rating"] == 4, "the rater's word did not reach the established claim")
         text = http("/api/brief?project=self-check-gated&agent=self-check")
         frame, later = text.partition("THIS ROUND'S FRAME")[2], text.partition("ALSO QUEUED")[2].partition("RULED OUT")[0]
-        need("ESTABLISHED" in text and "issue 12" in text and f'[{now["The footer overflows"]["id"]}]' in frame, "the next brief does not lead with the claim nearest to established")
-        need("tokenizer" in later and "trailer" in text.partition("STOPPED AT A GATE")[2].partition("ALSO QUEUED")[0], "the brief does not separate what is queued from what a gate stopped")
+        need("ESTABLISHED" in text and "issue 12" in text and "tokenizer" in frame.partition("ALSO QUEUED")[0], "the next brief does not lead with the fresh lead ahead of a claim a refuter stopped")
+        need("tokenizer" not in later and all(x in text.partition("STOPPED AT A GATE")[2].partition("ALSO QUEUED")[0] for x in ("footer", "trailer")), "the brief does not separate what is queued from what a gate stopped")
         (home / "scope.md").write_text("Only faults reachable over the network.\n")  # the person changes the question
         state = {n["text"]: n["state"] for n in http("/api/research?project=self-check-gated")}
         need(state["The length field overflows"] == "waiting", "a verdict outlived a change to the locked question")

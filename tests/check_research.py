@@ -190,8 +190,8 @@ def check(directory):
         # 1. The brief asks for the work and the handoff only: no commands to run, nothing to report.
         lean = brief("lean")
         for expected in ("RULED OUT (do not retry without a new reason", "- Footer overflows (why: footer is bounds-checked)",
-                         "Next test: Fuzz the footer", "Settle one frame this round.", "The frame is named at the end of this brief", "Nobody is watching this round.",
-                         "recorded on the dashboard for you", "every result you report is a claim", "TARGET: parser.c", "RULES: Stay local."):
+                         "Next test: Fuzz the footer", "This round has one frame to settle, named at the end of this brief.", "Nobody is watching.",
+                         "every result you report is a claim", "TARGET: parser.c", "RULES: Stay local."):
             assert expected in lean, (expected, lean)
         for absent in ("POST", "curl", "http://", "checker", "verifier", "task"):
             assert absent not in lean, (absent, lean)
@@ -346,7 +346,7 @@ def check(directory):
         assert sorted(offered) == ["bare", "fake", "wrap"] and offered["wrap"]["label"] == "Wrapper"
         assert sorted(listing) == ["config", "count", "epoch", "hold", "id", "launched", "launcherError", "launchers"], sorted(listing)
         assert offered["fake"] == {"label": "fake", "model": "", "models": ["fable", "opus", "sonnet", "haiku"], "interactive": True,
-                                   "command": [str(claude), "-p"], "takes_tools": True, "rounds": 200, "timeout_min": 1, "reply_wait": 120, "keep_background": False, "tools": "recipe"}, offered["fake"]
+                                   "command": [str(claude), "-p"], "takes_tools": True, "rounds": 200, "timeout_min": 1, "reply_wait": 120, "keep_background": False, "tools": "recipe", "workers": 1}, offered["fake"]
         assert offered["wrap"]["model"] == "base-model" and offered["wrap"]["models"] == ["base-model", "other"] and not offered["wrap"]["interactive"]
         assert offered["bare"]["models"] == [] and "broken" in listing["launcherError"]
         out = launch(recipe="fake", model="fable")
@@ -402,23 +402,29 @@ def check(directory):
             return argv[argv.index(name) + 1]
         try:
             out = launch()  # everything from the project's saved settings
-            assert out["recipe"] == "wrap" and out["settings"] == {"rounds": 7, "timeout_min": 0, "reply_wait": 0, "keep_background": True, "tools": "recipe", "model": "other"}, out
+            assert out["recipe"] == "wrap" and out["settings"] == {"rounds": 7, "timeout_min": 0, "reply_wait": 0, "keep_background": True, "tools": "recipe", "workers": 1, "model": "other"}, out
             argv = argv_of("lean", out["started"][0])
             assert (flag(argv, "--max-iterations"), flag(argv, "--timeout-min"), flag(argv, "--reply-wait")) == ("7", "0", "0") and "--keep-background" in argv
             assert flag(argv, "-m") == "other" and flag(argv, "--agent") == "wrap-1"
             entry = next(x for x in next(p for p in call("/api/projects") if p["id"] == "lean")["launched"] if x["agent"] == out["started"][0])
             assert entry["settings"] == out["settings"]
             out = launch(recipe="fake", rounds=3, keep_background=False)  # the request wins
-            assert out["settings"] == {"rounds": 3, "timeout_min": 0, "reply_wait": 0, "keep_background": False, "tools": "recipe", "model": "other"}, out
+            assert out["settings"] == {"rounds": 3, "timeout_min": 0, "reply_wait": 0, "keep_background": False, "tools": "recipe", "workers": 1, "model": "other"}, out
             argv = argv_of("lean", out["started"][0])
             assert flag(argv, "--max-iterations") == "3" and "--keep-background" not in argv and flag(argv, "--model") == "other"
             call("/api/stop", {"project": "lean"})
             refused("/api/launch", {"project": "lean", "recipe": "fake", "timeout_min": -1})
+            # Two workers: two loops of the same recipe side by side, each with its own name and folder, stopped together.
+            out = launch(recipe="fake", rounds=1, workers=2)
+            assert out["started"] == ["fake-1", "fake-2"] and out["settings"]["workers"] == 2, out
+            assert [flag(argv_of("lean", a), "--agent") for a in out["started"]] == ["fake-1", "fake-2"]
+            assert sorted(call("/api/stop", {"project": "lean"})["stopped"]) == ["fake-1", "fake-2"]
+            refused("/api/launch", {"project": "lean", "recipe": "fake", "workers": 5})
             call("/api/project", {"project": "lean", "loop": {}})  # cleared: the recipe's own fields, then the defaults
             assert config("lean")["loop"] == {}
             refused("/api/launch", {"project": "lean"})  # three recipes and none chosen
             out = launch(recipe="fake")
-            assert out["settings"] == {"rounds": 200, "timeout_min": 1, "reply_wait": 120, "keep_background": False, "tools": "recipe", "model": ""}, out
+            assert out["settings"] == {"rounds": 200, "timeout_min": 1, "reply_wait": 120, "keep_background": False, "tools": "recipe", "workers": 1, "model": ""}, out
             assert flag(argv_of("lean", out["started"][0]), "--timeout-min") == "1"
             (work / "launchers.json").write_text(json.dumps({"bare": recipes["bare"]}))  # one recipe: it is used without being named
             out = launch()
@@ -433,12 +439,12 @@ def check(directory):
 
             # There is no round style to set. With nothing queued a round widens; with a frame queued it settles that frame.
             wide = brief("style", "solo")
-            for expected in ("Follow your nose this round: nothing is queued", "Breadth beats proof", "in parallel", "Leads: line", "dead ground", "[score: 4] you saw direct evidence"):
+            for expected in ("Nothing is queued, so this round is yours", "however you see fit", "Leads lines"):
                 assert expected in wide, (expected, wide)
             assert "THIS ROUND'S FRAME" not in wide and call("/api/brief?project=style&agent=solo&as=json")["frame"] is None
             queued = call("/api/frames", {"project": "style", "frames": [{"text": "the tokenizer on nested brackets", "score": 2, "next": "time a deep input"}]})["added"]
             narrow = brief("style", "solo")
-            assert "Settle one frame this round." in narrow and "Follow your nose" not in narrow and f"- [{queued[0]}] hypothesis / open: the tokenizer" in narrow.partition("THIS ROUND'S FRAME (round 1 of 2 on it)")[2]
+            assert "This round has one frame to settle" in narrow and "this round is yours" not in narrow and f"- [{queued[0]}] hypothesis / open: the tokenizer" in narrow.partition("THIS ROUND'S FRAME (round 1 of 2 on it)")[2]
             call("/api/project", {"project": "style", "loop": {"recipe": "bare"}})
             out = launch("style")
             assert out["started"] == ["bare-1"] and "style" not in out["settings"], out
@@ -570,18 +576,18 @@ def check_units():
                                  {"name": "not known", "refute": "Look for an earlier report."}]}
                 write(cfg)
                 shown = server.public_config("c")
-                assert shown["gates"] == [{"name": "reproduces", "command": ["python3", "{project}/re play.py", "--strict"], "timeout_min": 10},
+                assert [{k: v for k, v in g.items() if k != "fp"} for g in shown["gates"]] == [{"name": "reproduces", "command": ["python3", "{project}/re play.py", "--strict"], "timeout_min": 10},
                                           {"name": "default config", "command": ["sh", "{project}/default.sh", "{artifact}"], "timeout_min": 2},
                                           {"name": "not known", "refute": "Look for an earlier report.", "timeout_min": 10}], shown["gates"]
-                seal = shown["fingerprint"]
-                assert len(seal) == 16 and shown["artifact"] == "a file holding the input"
+                seal, own = shown["fingerprint"], shown["gates"][0]["fp"]  # the whole question's, and the first gate's own
+                assert len(seal) == 16 and len({g["fp"] for g in shown["gates"]} | {seal}) == 4 and shown["artifact"] == "a file holding the input"
                 where = str((Path(home) / "c").resolve())
                 server.set_project({"project": "c", "gates": [], "lock": [], "goal": "g2"})  # the API cannot touch the gates or the lock
                 assert server.public_config("c")["fingerprint"] == seal and server.config("c")["goal"] == "g2"
                 text = server.brief("c", "a")
                 for expected in ("A RESULT COUNTS ONLY WHEN IT PASSES THE GATES, in this order: reproduces, default config, not known.",
                                  "- reproduces: python3 ", "--strict <artifact>", "- default config: sh ", "default.sh", "{artifact}", "to name what should be checked: a file holding the input. A command gate cannot run without one.",
-                                 "- not known: a separate round that sees only your claim and tries to refute it.", "Never edit the gates"):
+                                 "- not known: a separate round that sees only your claim and tries to refute it.", "The gates and what they read are not yours to edit"):
                     assert expected in text, (expected, text)
                 assert "Nothing re-checks" not in text
                 note = lambda body, n, **data: server.ingest({"project": "c", "type": "item", "section": "round-notes", "key": f"Round {n}", "agent": "a", "body": body,
@@ -603,8 +609,8 @@ def check_units():
                     raise AssertionError("a verdict for an earlier version of the question was accepted")
                 except ValueError as error:
                     assert "still due" in str(error)
-                assert verdict(one["id"], "reproduces", "passed", checked="one.bin", detail="ok", fp=seal)["fp"] == seal
-                assert [x["fp"] for x in todo] == [seal, seal]
+                assert verdict(one["id"], "reproduces", "passed", checked="one.bin", detail="ok", fp=own)["fp"] == own
+                assert [x["fp"] for x in todo] == [own, own]
                 verdict(two["id"], "reproduces", "failed", checked="two.bin", detail="no fault\n  exit 1")
                 for bad in (dict(id=one["id"], gate="reproduces", verdict="fine"), dict(id=one["id"], gate="nope", verdict="passed"),
                             dict(id="nope", gate="reproduces", verdict="passed"), dict(gate="reproduces", verdict="passed")):
@@ -616,7 +622,7 @@ def check_units():
                 # One gate passed makes the next one due; a claim a gate stopped waits there and becomes work.
                 now = {n["id"]: n for n in server.research("c")}
                 assert (now[one["id"]]["standing"], now[one["id"]]["state"], now[one["id"]]["at"], now[one["id"]]["agent"]) == (1, "waiting", "default config", "a")
-                assert (now[two["id"]]["standing"], now[two["id"]]["state"], now[two["id"]]["at"], now[two["id"]]["frame"]) == (0, "failed", "reproduces", True)
+                assert (now[two["id"]]["standing"], now[two["id"]]["state"], now[two["id"]]["at"], now[two["id"]]["frame"]) == (0, "failed", "reproduces", False)
                 todo = server.gates_pending("c")["pending"]
                 assert [(x["id"], x["gate"]) for x in todo] == [(one["id"], "default config")] and todo[0]["command"] == ["sh", where + "/default.sh", "{artifact}"], todo
                 verdict(one["id"], "default config", "passed", checked="some-other.bin")  # a verdict on another artifact is not about this claim
@@ -636,10 +642,13 @@ def check_units():
                 text = server.brief("c", "a")
                 settled, refused = text.partition("ESTABLISHED (passed every gate")[2].partition("CLAIMED, BUT STOPPED AT A GATE")[::2]
                 assert f"- [{one['id']}] Lemma one holds (artifact: one.bin)" in settled, text
-                # The stopped claim is this round's frame: nearest to a result. With gates behind it, the frame is assumed to pay off.
-                frame = text.partition("THIS ROUND'S FRAME (round 1 of 3 on it)")[2]
-                assert f"- [{two['id']}] conclusion / supported: Lemma two holds" in frame and "It is a claim that a gate stopped." in frame and "Stopped at reproduces (failed) on two.bin:" in frame, text
-                assert "no fault" in frame and "rule it out; do not reword it" in frame and "Try hard to make this frame pay off" not in frame
+                # A stopped claim is not queued: any round may repair it from the list. The person's mark gives it a round of its own.
+                assert "THIS ROUND'S FRAME" not in text and f"- [{two['id']}] Lemma two holds" in refused and "to repair one, claim it again starting the Results line with its id" in text
+                server.ingest({"project": "c", "type": "research", "id": two["id"], "source": "you", "priority": True})
+                text = server.brief("c", "a")
+                frame = text.partition("THIS ROUND'S FRAME (round 1 of 3 on it; the person marked it)")[2]
+                assert f"- [{two['id']}] conclusion / supported: Lemma two holds (the person's priority)" in frame or f"- [{two['id']}] conclusion / supported: Lemma two holds" in frame and "It is a claim that a gate stopped." in frame and "Stopped at reproduces (failed) on two.bin:" in frame, text
+                assert "no fault" in frame and "rule it out; do not reword it" in frame
                 assert f"a Results line that starts with [{two['id']}] and ends with [check: <artifact>], or" in frame
                 assert f"- [{loose['id']}] It looks true for n < 100" in text.partition("CLAIMED, NOT YET THROUGH THE GATES")[2]
                 # The person's audit is of this artifact under these gates.
@@ -678,7 +687,7 @@ def check_units():
                 verdict(two["id"], "reproduces", "error", checked="two-b.bin", detail="timeout after 10 min")
                 assert "Stopped at reproduces (could not run) on two-b.bin" in server.brief("c", "a")
                 server.add_frames({"project": "c", "frames": ["a fresh place to look"]})  # an open frame with gates behind it is assumed to pay off
-                assert "Try hard to make this frame pay off. Claim only what you ran and saw yourself." in server.brief("c", "a").partition("THIS ROUND'S FRAME")[2]
+                assert "Settle it one way or the other:" in server.brief("c", "a").partition("THIS ROUND'S FRAME")[2]
                 # A refuter that cites where a claim was already reported stops it for good: it is not queued for repair.
                 fresh = server.ingest({"project": "c", "type": "research", "kind": "conclusion", "status": "supported", "text": "A thing that turns out to be in a 1915 paper", "artifact": "k.bin"})["id"]
                 for gate in ("reproduces", "default config"):
@@ -686,7 +695,7 @@ def check_units():
                 verdict(fresh, "not known", "known", checked="k.bin", detail="Verdict: known - Hardy 1915, section 3, states it")
                 cited = next(n for n in server.research("c") if n["id"] == fresh)
                 assert (cited["state"], cited["at"], cited["standing"], cited["frame"]) == ("failed", "not known", 2, False), cited
-                assert "says it is already known" in server.brief("c", "a") and fresh not in [n["id"] for n in server.queue(server.research("c"))]
+                assert "ALREADY KNOWN (a gate found each reported elsewhere" in server.brief("c", "a") and fresh not in [n["id"] for n in server.queue(server.research("c"))]
                 assert next(n for n in server.research("c") if n["id"] == two["id"])["frame"] is False  # nothing for a round to repair
                 server.ingest({"project": "c", "type": "research", "id": one["id"], "status": "open", "source": "you"})  # the person reopens what was established and audited
                 note(f"Handoff: x\nResults:\n- [{one['id']}]: in fact a different thing entirely\nNext: y", 9)
@@ -732,7 +741,9 @@ def check_units():
                     verdict(i, "known")
                 due = server.gates_pending("r")["pending"]
                 assert [x["kind"] for x in due] == ["rate", "rate"] and "Rating: <1 to 5> - " in due[0]["brief"] and "RULES: new results only" in due[0]["brief"] and "Verdict:" not in due[0]["brief"], due
-                assert all(n["state"] == "waiting" and n["rating"] is None for n in server.research("r"))
+                # a rater stops nothing: both are established already, with the rating still due and nothing else waiting on it
+                assert all((n["state"], n["rate"], n["rating"]) == ("established", "matters", None) for n in server.research("r"))
+                fps = {g["name"]: g["fp"] for g in gates}
                 verdict(made["the small one"], "matters", rating=2, detail="Rating: 2 - minor")
                 verdict(made["the big one"], "matters", rating=5, detail="Rating: 5 - changes practice")
                 verdict(made["the big one"], "holds", rating=9)  # a rating out of range is dropped
@@ -741,9 +752,59 @@ def check_units():
                 listed = [line for line in server.status("r", "http://x").partition("ESTABLISHED")[2].splitlines() if line.startswith("- [")][:2]
                 assert "the big one (rated 5 of 5)" in listed[0] and "the small one (rated 2 of 5)" in listed[1], listed
                 assert "Gates: holds (refuter, on reader) -> known (refuter, on missing) -> matters (rater, on reader)" in server.status("r", "http://x")
-                assert server.brief("r", "a").partition("ESTABLISHED")[2].index("the big one") < server.brief("r", "a").partition("ESTABLISHED")[2].index("the small one")
+                assert server.gates_pending("r") == {"pending": []} and all(n["rate"] is None for n in server.research("r"))
+                # Rewording one gate leaves the others' verdicts standing: only that gate is due again. A rater written first still runs last.
+                cfg = json.loads((Path(home) / "r" / "project.json").read_text())
+                cfg["gates"] = [cfg["gates"][2], cfg["gates"][0], {**cfg["gates"][1], "refute": "Find it elsewhere, and cite it."}]
+                (Path(home) / "r" / "project.json").write_text(json.dumps(cfg))
+                again = {g["name"]: g["fp"] for g in server.public_config("r")["gates"]}
+                assert list(again) == ["holds", "known", "matters"] and (again["holds"], again["matters"]) == (fps["holds"], fps["matters"]) and again["known"] != fps["known"]
+                assert [(x["gate"], x["kind"]) for x in server.gates_pending("r")["pending"]] == [("known", "refute")] * 2
+                assert all((n["state"], n["standing"], n["rating"]) == ("waiting", 1, None) for n in server.research("r"))
+                for i in made.values():
+                    verdict(i, "known")
+                assert {n["text"]: (n["state"], n["rating"]) for n in server.research("r")} == {"the small one": ("established", 2), "the big one": ("established", 5)}
+                # A longer time limit asks the same question: no verdict is lost to it.
+                cfg["gates"][1]["timeout_min"] = 55
+                (Path(home) / "r" / "project.json").write_text(json.dumps(cfg))
+                assert {g["name"]: g["fp"] for g in server.public_config("r")["gates"]} == again
+                # Saying an established claim again, about the same artifact, changes nothing; naming another artifact starts it over.
+                server.ingest({"project": "r", "type": "research", "id": made["the big one"], "kind": "conclusion", "status": "supported", "text": "the big one", "artifact": ""})
+                assert next(n for n in server.research("r") if n["id"] == made["the big one"])["state"] == "established"
+                server.ingest({"project": "r", "type": "research", "id": made["the big one"], "kind": "conclusion", "status": "supported", "text": "the big one", "artifact": "b.bin"})
+                assert next(n for n in server.research("r") if n["id"] == made["the big one"])["state"] == "waiting"
+                # The brief stays a statement of what counts and what is known, not advice on how to work. If this fails because a
+                # line was added, the line needs a failure it prevents that the record shows; otherwise it does not belong.
+                (Path(home) / "lean").mkdir()
+                (Path(home) / "lean" / "project.json").write_text(json.dumps({"goal": "g", "gates": [{"name": "runs", "command": "true"}, {"name": "holds", "refute": "Break it."}]}))
+                lean = server.brief("lean", "a").strip().splitlines()
+                assert len(lean) <= 12 and sum(len(x) for x in lean) <= 1300, (len(lean), sum(len(x) for x in lean), lean)
             finally:
                 server.PROJECTS, server.LAUNCH_FILE = kept, launch_file
+        # Side by side: two loops never take the same frame, and each runs the gates on its own claims.
+        with tempfile.TemporaryDirectory() as home:
+            kept, server.PROJECTS, was = server.PROJECTS, Path(home), server.working
+            try:
+                (Path(home) / "p").mkdir()
+                (Path(home) / "p" / "project.json").write_text(json.dumps({"goal": "g"}))
+                server.working = lambda project: {"w-1", "w-2"}
+                a, b, c = server.add_frames({"project": "p", "frames": [{"text": "first place", "score": 5}, {"text": "second place", "score": 4}, "third place"]})["added"]
+                assert server.plan("p", "w-1", hold=True)[1] == a and server.plan("p", "w-2", hold=True)[1] == b  # handed out, so held even before the round starts
+                assert server.plan("p", "w-1", hold=True)[1] == a and server.plan("p", "someone-reading")[1] == c
+                server.HELD.clear()
+                server.ingest({"project": "p", "type": "activity", "agent": "w-1", "text": "Iteration 1 started", "data": {"frame": a}})
+                assert server.plan("p", "w-2")[1] == b and server.plan("p", "w-1")[1] == a
+                server.ingest({"project": "p", "type": "activity", "agent": "w-1", "text": "Iteration 1 finished (exit 0)"})
+                assert server.plan("p", "w-2")[1] == a  # the round on it is over and it is still open
+                claim = lambda agent, text: server.ingest({"project": "p", "type": "research", "kind": "conclusion", "status": "supported", "text": text, "agent": agent})["id"]
+                one, two, gone = claim("w-1", "from the first"), claim("w-2", "from the second"), claim("old-9", "from a loop that is gone")
+                due = lambda agent: sorted(x["id"] for x in server.gates_pending("p", agent)["pending"])
+                assert due("w-1") == sorted([one, gone]) and due("w-2") == [two], (due("w-1"), due("w-2"))
+                server.working = lambda project: set()
+                assert due("anyone") == sorted([one, two, gone])  # one loop, or none: everything due
+            finally:
+                server.PROJECTS, server.working = kept, was
+                server.HELD.clear()
         # Frames: what the loop works through. A score is the rounds a frame is worth; a round that leaves its frame open spends one.
         with tempfile.TemporaryDirectory() as home:
             kept, server.PROJECTS = server.PROJECTS, Path(home)
@@ -802,7 +863,7 @@ def check_units():
                 sure = next(n for n in server.research("w") if n["text"] == "a lead a round calls certain")
                 assert sure["budget"] == 4  # 5 is the person's to give: a round's own lead tops out at 4
                 server.ingest({"project": "w", "type": "research", "id": sure["id"], "status": "superseded", "source": "you"})
-                assert given is None and "Follow your nose this round: nothing is queued" in text and f"- [{only}] the one place" in text.partition("SET ASIDE (their rounds are spent")[2], text
+                assert given is None and "Nothing is queued, so this round is yours" in text and f"- [{only}] the one place" in text.partition("SET ASIDE (their rounds are spent")[2], text
             finally:
                 server.PROJECTS = kept
         # Tool access is a setting: "wide" adds web and subagents to a Claude recipe's allow-list by name and leaves other programs alone

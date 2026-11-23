@@ -659,7 +659,7 @@ def run_conversation(args, brief, timeout, env, inbox, reply_wait=120, keep=Fals
     return outcome, ("\n\n".join(r for r in replies if r) or screen.tail).replace("\r\n", "\n"), stats
 
 
-REFUTERS_PER_ROUND = 4
+COLOUR = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")  # some agents colour their labels; the labels are read as plain text
 RATING = re.compile(r"^\s*(?:[-*]\s+)?\**\s*rating\s*\**\s*:\s*\**\s*([1-5])\b", re.I | re.M)
 VERDICT = re.compile(r"^\s*(?:[-*]\s+)?\**\s*verdict\s*\**\s*:\s*\**\s*(refuted|known|stands)\b(?!\s*\**\s*[-:]?\s*<)", re.I | re.M)
 
@@ -670,7 +670,7 @@ def run_gates(a, query, command):
     0. A refuter gate passes when a fresh round, shown only the claim, ends with "Verdict: stands"; "refuted" fails it,
     and "known" fails it for good (what is already known cannot be repaired). A gate that cannot start, runs out of time
     or (a refuter) gives no verdict is an error. Each verdict goes on the claim's thread."""
-    done, refuters, silent = set(), 0, 0
+    done, silent = set(), 0
     for _ in range(10):  # at most this many gates deep
         try:
             pending = json.loads(call("/api/gates?" + query)).get("pending") or []
@@ -682,11 +682,10 @@ def run_gates(a, query, command):
         for item in pending:
             done.add((item.get("id"), item.get("gate")))
             if not isinstance(item.get("command"), list):
-                # A refuter is a whole round of the harness. A few per research round; the rest stay due for the next one.
-                # A harness that twice gives no verdict is not one that can refute (a plain script, say): leave them due.
-                if refuters >= REFUTERS_PER_ROUND or silent >= 2:
+                # Every claim is settled before the next research round, so that round's brief carries the verdicts. A harness
+                # that twice gives no verdict is not one that can refute (a plain script, say): leave the rest due.
+                if silent >= 2:
                     continue
-                refuters += 1
             artifact, limit, rating = str(item.get("artifact") or ""), float(item.get("timeout_min") or 10) * 60, None
             # A gate runs in the folder the claim's round worked in, where its artifact was left, whichever loop runs it.
             where = item.get("cwd") if isinstance(item.get("cwd"), str) and os.path.isdir(item["cwd"]) else None
@@ -712,11 +711,11 @@ def run_gates(a, query, command):
                     finally:
                         os.unlink(f.name)
                     if item.get("kind") == "rate":  # a rater never stops a claim: it says how much an established one matters
-                        said = RATING.findall(output)
+                        said = RATING.findall(COLOUR.sub("", output))
                         rating = int(said[-1]) if said else None
                         verdict = "error" if code != 0 or not said else "passed"
                     else:
-                        said = VERDICT.findall(output)
+                        said = VERDICT.findall(COLOUR.sub("", output))
                         verdict = "error" if code != 0 or not said else {"refuted": "failed", "known": "known"}.get(said[-1].lower(), "passed")
                     silent = silent + 1 if verdict == "error" else 0
                 detail = output.strip() if isinstance(code, int) else f"{output.strip()}\n{code}".strip()
@@ -728,6 +727,13 @@ def run_gates(a, query, command):
                                      "verdict": verdict, "detail": detail[-4000:], "checked": artifact, "fp": item.get("fp"), **({"rating": rating} if rating else {})})
             except OSError:
                 pass  # it stays due (the server was away, or the gates changed while this one ran), and runs again after the next round
+
+
+def closing(output):
+    """What is saved of a round: from its last Handoff marker on, so a long handoff keeps its head; else the end of what it printed."""
+    text = COLOUR.sub("", output).strip()
+    marks = [m.start() for m in re.finditer(r"^[ \t]*(?:[-*#]+[ \t]*)?(?:\*\*|__)?[ \t]*handoff[ \t]*(?:\*\*|__)?[ \t]*:", text, re.I | re.M)]
+    return text[marks[-1]:][:30000] if marks else text[-6000:]
 
 
 def main():
@@ -830,10 +836,12 @@ def run_loop():
 
         n += 1
         # Where it is working, and for how long: neither is in the record, and both change what a round should do.
-        brief += (f"\nYou are working in {os.getcwd()}. It persists between rounds, so files earlier rounds left are here. The gates run here after you "
-                  "finish, on the path you name: leave each artifact in place and never overwrite an earlier one.\n")
+        # The next round knows only the handoff and this folder, so both are where anything worth keeping has to go.
+        brief += (f"\nYou are working in {os.getcwd()}. It persists: earlier rounds' files are here, the next round starts from what you leave "
+                  "(programs included), and the gates run here on the path you name, so never overwrite an earlier artifact.\n")
         if a.timeout_min:
-            brief += f"This round is stopped after {a.timeout_min:g} minutes, and a stopped round leaves no handoff: nothing it found is kept. Write the handoff well before then.\n"
+            brief += (f"The round is stopped at {a.timeout_min:g} minutes, and a stopped round leaves no handoff. The time is yours to use; "
+                      "finishing early gains nothing.\n")
         brief += "\n\n" + HANDOFF
         with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".txt", prefix="brief-", delete=False) as f:
             f.write(brief)
@@ -858,7 +866,7 @@ def run_loop():
             try:
                 call("/api/events", {"project": a.project, "type": "item", "section": "round-notes", "agent": a.agent, "harness": a.harness,
                                      "key": f"Round {n} · {a.agent} · {time.strftime('%Y-%m-%d %H:%M')}",
-                                     "data": {"loop_session": a.session, "cwd": os.getcwd(), **({"frame": frame} if frame else {})}, "body": output.strip()[-6000:]})
+                                     "data": {"loop_session": a.session, "cwd": os.getcwd(), **({"frame": frame} if frame else {})}, "body": closing(output)})
             except OSError:
                 pass
             run_gates(a, query, command)

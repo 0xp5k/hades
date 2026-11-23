@@ -376,6 +376,9 @@
       <select class="field glass" id="ls-tools"><option value="recipe">Shell and files (the agent's own list)</option>
         <option value="wide">Also web search, web fetch and subagents</option></select></div>
     <div class="ls-grid">
+      <div><label class="lbl" for="ls-workers">Rounds side by side</label>
+        <select class="field glass" id="ls-workers"><option value="1">1</option><option value="2">2: each on its own frame</option>
+          <option value="3">3</option><option value="4">4</option></select></div>
       <div><label class="lbl" for="ls-rounds">Rounds</label>
         <div class="ls-pair"><input class="field glass ls-num" id="ls-rounds" type="number" min="1" max="500" inputmode="numeric">
           <label class="ls-check"><input type="checkbox" id="ls-rounds-forever"> Until stopped</label></div></div>
@@ -464,7 +467,7 @@ function route() {
   const parts = location.hash.replace(/^#\/?/, "").split("/").map(x => { try { return decodeURIComponent(x); } catch (e) { return x; } });
   const p = S.projects.find(p => p.id === parts[0]) || S.projects[0] || null;
   const list = p ? pages(p) : [];
-  const page = list.find(x => x.id === parts[1]) || list[0] || null;
+  const page = list.find(x => x.id === (parts[1] === "live" ? "loop" : parts[1])) || list[0] || null;
   return { p, list, page, focus: page?.id === "research" ? parts[2] || "" : "" };
 }
 const threadHref = (pid, id) => href(pid, "research") + "/" + encodeURIComponent(id);
@@ -475,21 +478,26 @@ const isClaim = n => n.status === "supported" || n.status === "reproduced";
 // Where a claim stands against the project's gates, in order: how many it has passed and what is stopping it. Only a claim
 // is assessed. A command gate needs an artifact to run on; a refuter works from the claim. A verdict given under other
 // gates or locked files (another fingerprint) counts for nothing.
-function assess(n, gates, seal) {
-  if (!gates.length || !isClaim(n)) return { standing: 0, state: null, at: null };
+function assess(n, gates) {
+  if (!gates.length || !isClaim(n)) return { standing: 0, state: null, at: null, rate: null };
   for (let i = 0; i < gates.length; i++) {
     const g = gates[i], got = (n.gates || {})[g.name];
-    if (g.command && !n.artifact) return { standing: i, state: "unchecked", at: g.name };
-    if (!got || got.fp !== seal || (got.checked || "") !== (n.artifact || "")) return { standing: i, state: "waiting", at: g.name };  // never run, or on another question or artifact
-    if (got.verdict === "error" && (got.tries || 1) < 3) return { standing: i, state: "waiting", at: g.name };  // a gate that could not run is run again
-    if (got.verdict !== "passed") return { standing: i, state: got.verdict === "failed" || got.verdict === "known" ? "failed" : "error", at: g.name };
+    const again = !got || got.fp !== g.fp || (got.checked || "") !== (n.artifact || "")  // never run, or on another question or artifact
+      || (got.verdict === "error" && (got.tries || 1) < 3);  // a gate that could not run is run again
+    if (g.rate) {  // a rater stops nothing: the claim is established, and this rating is still due
+      if (again) return { standing: i, state: "established", at: null, rate: g.name };
+      continue;
+    }
+    if (g.command && !n.artifact) return { standing: i, state: "unchecked", at: g.name, rate: null };
+    if (again) return { standing: i, state: "waiting", at: g.name, rate: null };
+    if (got.verdict !== "passed") return { standing: i, state: got.verdict === "failed" || got.verdict === "known" ? "failed" : "error", at: g.name, rate: null };
   }
-  return { standing: gates.length, state: "established", at: null };
+  return { standing: gates.length, state: "established", at: null, rate: null };
 }
-// The frames the loop will take, in its order: the person's marks, then nearest to established, then highest score, then oldest.
-const queueOrder = (a, b) => (b.priority === true) - (a.priority === true) || b.standing - a.standing || b.budget - a.budget || a.born - b.born;
+// The frames the loop will take, in its order: the person's marks, then highest score, then oldest.
+const queueOrder = (a, b) => (b.priority === true) - (a.priority === true) || b.budget - a.budget || a.born - b.born;
 // Every thread sits in exactly one of these. The Overview counts them; the Research page groups by them.
-const BUCKETS = [["established", "Established"], ["stopped", "Stopped at a gate"], ["waiting", "Waiting for a gate"], ["unchecked", "Claimed, unchecked"],
+const BUCKETS = [["established", "Established"], ["stopped", "Stopped at a gate"], ["waiting", "Waiting for a gate"], ["unchecked", "Claimed, no file to check"],
   ["ruled", "Ruled out"], ["queued", "Queued"], ["aside", "Set aside"]];
 function bucket(n) {
   if (isClaim(n)) return n.state === "established" ? "established" : n.state === "failed" || n.state === "error" ? "stopped" : n.state === "waiting" ? "waiting" : "unchecked";
@@ -532,9 +540,9 @@ function derive(p) {
         }
         continue;
       }
-      // Claimed again (an artifact named, even the same one) or reworded: a different claim, so every gate and the audit are still to come.
+      // Claimed again with another artifact, reworded, or claimed again after a gate said no: a different claim, so every gate and the audit are still to come.
       const same = t => String(t || "").replace(/\s+/g, " ").trim().toLowerCase().replace(/[.!?,;: ]+$/, "");
-      const fresh = old && (Object.hasOwn(e, "artifact") || (e.text && old.text && same(e.text) !== same(old.text)));
+      const fresh = old && ((Object.hasOwn(e, "artifact") && ((e.artifact || "") !== (old.artifact || "") || Object.values(old.gates || {}).some(g => g && g.verdict !== "passed"))) || (e.text && old.text && same(e.text) !== same(old.text)));
       const was = !old ? {} : fresh ? { ...old, gates: undefined, audited: undefined, audit_fp: undefined, audit_artifact: undefined } : old;
       research.set(e.id, { ...was, ...e, idx, born: old ? old.born : idx, history: [...(old?.history || []), e] });
     }
@@ -548,14 +556,14 @@ function derive(p) {
   }
   const gates = Array.isArray(p.config.gates) ? p.config.gates : [], seal = p.config.fingerprint || "";
   for (const n of research.values()) {  // the same reading of a thread as the server's research()
-    Object.assign(n, assess(n, gates, seal), { priority: n.priority === true, attempts: spent.get(n.id) || 0, budget: Number.isInteger(n.score) ? n.score : 3,
+    Object.assign(n, assess(n, gates), { priority: n.priority === true, attempts: spent.get(n.id) || 0, budget: Number.isInteger(n.score) ? n.score : 3,
       audited: n.audited === true && n.audit_fp === seal && (n.audit_artifact || "") === (n.artifact || "") });
-    n.rating = n.state !== "established" ? null : gates.filter(g => g.rate).map(g => (n.gates || {})[g.name] || {})
-      .find(r => r.fp === seal && (r.checked || "") === (n.artifact || "") && r.rating)?.rating || null;
+    n.rating = n.state !== "established" ? null : gates.filter(g => g.rate).map(g => ({ ...((n.gates || {})[g.name] || {}), of: g.fp }))
+      .find(r => r.fp === r.of && (r.checked || "") === (n.artifact || "") && r.rating)?.rating || null;
     const settled = n.status === "contradicted" || n.status === "superseded";
     n.ruled = n.status === "contradicted" || (n.status === "superseded" && n.history.some(e => e.status === "contradicted"));
     const known = n.state === "failed" && ((n.gates || {})[n.at] || {}).verdict === "known";  // already reported: nothing a round can repair
-    n.frame = !settled && (n.status === "open" || (n.state === "failed" && !known) || (n.priority && n.state === "unchecked"));
+    n.frame = !settled && (n.status === "open" || (n.priority && (n.state === "unchecked" || (n.state === "failed" && !known))));  // a stopped claim is queued only by the person's mark
     n.stalled = n.frame && n.attempts >= n.budget;
     n.bucket = bucket(n);
   }
@@ -640,19 +648,19 @@ function paged(key, list, step, render, wrap = x => x) {
 /* ---------- pages ---------- */
 function novelty(x) {
   const known = typeof x?.known === "string" ? x.known.trim() : "";
-  return !known ? "Novelty not stated" : known.toLowerCase() === "new" ? "Agent says this is new, and that it looked" : "Already known: " + known;
+  return !known ? "" : known.toLowerCase() === "new" ? "Agent says this is new, and that it looked" : "Already known: " + known;
 }
 // One gate as it stands for one claim: [pill class, mark, short word, sentence]. Only a gate's own verdict is ever styled as a pass.
 function gateState(n, g, i, seal) {
-  const got = (n.gates || {})[g.name], live = got && got.fp === seal;
+  const got = (n.gates || {})[g.name], live = got && got.fp === g.fp;
   if (i < n.standing && live && g.rate) return ["solid", "✓ ", `rated ${got.rating || "?"} of 5`, `Rated ${got.rating || "?"} of 5 for how much it matters`];
   if (i < n.standing && live) return ["solid", "✓ ", g.refute ? "not refuted" : "passed", g.refute ? "Not refuted" : "Passed"];
   if (i !== n.standing) return ["", "", "not reached", "Not reached"];
-  if (n.state === "failed" && got?.verdict === "known") return ["bad", "✗ ", "already known", "Already known: a refuter cited where. It is not queued again"];
+  if (n.state === "failed" && got?.verdict === "known") return ["bad", "✗ ", "already known", "Already reported; the gate's output says where. Not retried"];
   if (n.state === "failed") return ["bad", "✗ ", g.refute ? "refuted" : "failed", g.refute ? "Refuted" : "Failed"];
   if (n.state === "error") return ["bad", "! ", "could not run", "Could not run"];
   if (n.state === "unchecked") return ["", "", "needs an artifact", "Needs an artifact: the claim names none for this command to run on"];
-  return ["info", "… ", got ? "due again: the gates or locked files changed" : "due", got ? "Due again: the gates or the locked files changed since it ran" : "Due after the round ends"];
+  return ["info", "… ", got ? "due again: the gates or locked files changed" : "due", got ? "Due again: the gates or the locked files changed since it ran" : "Due: it runs after the current round, or when a loop next runs"];
 }
 const auditPill = n => n.audited ? '<span class="pill ok">Audited by you</span>' : "";
 function gatePills(n, p) {
@@ -667,9 +675,9 @@ function standsText(n, p) {
   const gates = p.config.gates || [], rounds = `${n.attempts} of ${plural(n.budget, "round")} spent`;
   const turn = n.place ? `, #${n.place} in the queue` : n.stalled ? ", set aside" : "";
   switch (n.bucket) {
-    case "established": return `established: passed all ${plural(gates.length, "gate")}`;
+    case "established": return `established: passed all ${plural(gates.filter(g => !g.rate).length, "gate")}` + (n.rate ? "; its rating is due" : "");
     case "stopped": return `stopped at gate "${n.at}" (${n.state === "failed" ? "failed" : "could not run"})${turn}`;
-    case "waiting": return `claimed, waiting for gate "${n.at}" (${n.standing} of ${gates.length} passed)${turn}`;
+    case "waiting": return `claimed, waiting for gate "${n.at}" (${n.standing} of ${gates.filter(g => !g.rate).length} passed)${turn}`;
     case "unchecked": return (gates.length ? `claimed, unchecked: gate "${n.at}" needs an artifact` : "claimed; this project has no gates") + turn;
     case "ruled": return "ruled out";
     case "queued": return `queued #${n.place}, ${rounds}`;
@@ -686,8 +694,9 @@ function copyThread(id) {
 function threadActions(n) {
   if (!n?.id) return "";
   const prio = n.priority === true, settled = n.status === "superseded" || n.status === "contradicted", key = "thread:" + n.id, open = S.open.has(key);
+  const over = n.state === "established" || (n.state === "failed" && ((n.gates || {})[n.at] || {}).verdict === "known");  // nothing for a round to do
   return `<div class="claim-actions">${settled ? `<button class="btn small ghost" data-thread-status="open" data-id="${esc(n.id)}" data-fk="drop:${esc(n.id)}" title="Make it an open frame again">Reopen</button>`
-    : `<button class="btn small ghost" data-priority="${esc(n.id)}" data-fk="pursue:${esc(n.id)}" aria-pressed="${prio}" title="${prio ? "Marked as a priority. Press to remove the mark." : "Put this at the front of the queue, with its rounds to spend again"}">${prio ? "★ Pursuing" : "Pursue"}</button>
+    : `${over ? "" : `<button class="btn small ghost" data-priority="${esc(n.id)}" data-fk="pursue:${esc(n.id)}" aria-pressed="${prio}" title="${prio ? "Marked as a priority. Press to remove the mark." : "Put this at the front of the queue, with its rounds to spend again"}">${prio ? "★ Pursuing" : "Pursue"}</button>`}
     <button class="btn small ghost" data-thread-status="superseded" data-id="${esc(n.id)}" data-fk="drop:${esc(n.id)}">Drop</button>`}
     <button class="btn small ghost" data-copy-thread="${esc(n.id)}" data-fk="copy:${esc(n.id)}" title="Copy a one-line reference to this thread for a chat with Claude">Copy for Claude</button>
     <button class="btn small ghost" data-open="${esc(key)}" data-fk="open:${esc(key)}" aria-expanded="${open}">${open ? "Hide details" : "Details"}</button></div>`;
@@ -713,13 +722,13 @@ function threadDetails(n, all, p) {
   }).join("");
   const hk = "history:" + n.id, showHistory = S.open.has(hk);
   return `<div class="thread-details">
-    <div class="sub">${esc(n.id)} · ${esc(n.kind || "thread")} · ${esc(standsText(n, p))}${n.area ? ` · ${esc(n.area)}` : ""}${n.origin === "handoff" ? " · from a handoff" : ""} · ${esc(author(n))}</div>
+    <div class="sub">${esc(n.id)} · ${esc(standsText(n, p))}${n.area ? ` · ${esc(n.area)}` : ""} · ${esc(author(n))}</div>
     ${n.scope || n.snapshot ? `<div class="card mt2"><div class="sub">Research context</div>${n.scope ? `<div><b>Scope:</b> ${esc(n.scope)}</div>` : ""}${n.snapshot ? `<div><b>Snapshot:</b> <code>${esc(n.snapshot)}</code></div>` : ""}</div>` : ""}
     ${n.found_in ? `<div class="sub mt2">Found while looking at: ${esc(n.found_in)}</div>` : ""}
     ${n.body ? `<div class="md mt2">${md(n.body)}</div>` : ""}
     ${n.frame ? `<div class="sub mt2">${n.stalled ? `Set aside: its ${n.budget} round${n.budget === 1 ? " is" : "s are"} spent, so the loop has moved on. Pursue gives it ${n.budget} more.` : `${n.attempts} of ${n.budget} round${n.budget === 1 ? "" : "s"} spent on it.`}</div>` : ""}
     ${n.state !== null ? `<div class="card mt2"><div class="sub">Gates${n.artifact ? `, run on <code>${esc(n.artifact)}</code>` : ", with no artifact named"}</div>${gates.map((g, i) => {
-      const got = (n.gates || {})[g.name], live = got && got.fp === seal;
+      const got = (n.gates || {})[g.name], live = got && got.fp === g.fp;
       return `<div class="gate-row"><b>${esc(g.name)}</b> · ${gateState(n, g, i, seal)[3]}${live && got.detail && i <= n.standing ? `<pre class="check-out">${esc(got.detail)}</pre>` : ""}</div>`; }).join("")}</div>` : ""}
     ${n.conditions ? `<div class="card mt2"><div class="sub">Conditions</div>${esc(n.conditions)}</div>` : ""}
     ${n.next ? `<div class="card mt2"><div class="sub">Next discriminating test</div>${esc(n.next)}</div>` : ""}
@@ -740,15 +749,17 @@ function gateLine(p) {
   const gates = p.config.gates || [];
   if (!gates.length) return "This project has no gates, so every result is the agent's claim.";
   if (p.config.default_gates) return `Every claim goes through the built-in refutation gate, <b>${esc(gates[0].name)}</b>: a fresh round is shown only the claim and told to kill it.`;
-  return `A result is established only when it passes this project's gate${gates.length > 1 ? "s, in order" : ""}: ${gates.map(g => `<b>${esc(g.name)}</b>`).join(" → ")}.`;
+  const stops = gates.filter(g => !g.rate), raters = gates.filter(g => g.rate);
+  return `A result is established only when it passes this project's gate${stops.length > 1 ? "s, in order" : ""}: ${stops.map(g => `<b>${esc(g.name)}</b>`).join(" → ")}.`
+    + (raters.length ? ` It is then rated by ${raters.map(g => `<b>${esc(g.name)}</b>`).join(", ")}.` : "");
 }
 
 const CLAIM_BUCKETS = ["established", "stopped", "waiting", "unchecked"];
 const RESEARCH_TIMES =[["all", "All"], ["night", "Since last night"], ["day", "Last 24 hours"]];
 const GROUP_NOTES = {
-  stopped: "A gate said no. Each goes back in the queue, so a round can repair it or rule it out.",
-  waiting: "The loop runs the next gate after the current round ends.",
-  queued: "What the loop will work, in the order it takes them: open frames, and claims a gate stopped.",
+  stopped: "A gate said no. Any round may repair one or rule it out; Pursue gives it a round of its own.",
+  waiting: "The next gate runs after the current round, or when a loop next runs.",
+  queued: "What the loop works on next, in order.",
   aside: "Their rounds are spent, so the loop has moved on. Pursue gives one its rounds again.",
   dropped: "Set aside by hand. Reopen brings one back."
 };
@@ -779,18 +790,18 @@ function researchPanel(p, d) {
   const short = ts => new Date(ts).toLocaleString([], {month:"short", day:"numeric", hour:"numeric", minute:"2-digit"});
   const clip = (s, n = 320) => { s = String(s || "").trim(); return s.length > n ? s.slice(0, n - 1) + "…" : s; };
   const by = x => x.thread.agent || (x.thread.source === "you" ? "you" : "");
-  const when = x => `${esc(ago(x.ts).toLowerCase())}${by(x) ? " · " + esc(by(x)) : ""}${x.thread.origin === "handoff" ? " · from a handoff" : ""}`;
+  const when = x => `${esc(ago(x.ts).toLowerCase())}${by(x) ? " · " + esc(by(x)) : ""}`;
   const details = n => S.open.has("thread:" + n.id) ? threadDetails(n, d.research, p) : "";
-  const turnPill = n => n.place === 1 ? '<span class="pill info">Next up</span>' : n.place ? `<span class="pill">#${n.place} in queue</span>` : n.stalled ? '<span class="pill">Set aside</span>' : "";
+  const turnPill = n => n.id === S.workingOn ? '<span class="pill info">Working now</span>' : n.place === 1 ? '<span class="pill info">Next up</span>' : n.place ? `<span class="pill">#${n.place} in queue</span>` : n.stalled ? '<span class="pill">Set aside</span>' : "";
   const anchor = n => ` id="research-${esc(n.id)}"`;
   const dropped = n => n.status === "superseded" && !n.ruled ? '<span class="pill">Dropped</span>' : "";
   // A claim is what the agent says. Only the project's gates establish it.
   const claim = x => {
-    const n = x.thread, says = n.body ? clip(n.body) : n.origin === "handoff" ? "Claimed in its closing handoff." : "No further detail given.";
+    const n = x.thread, says = n.body ? clip(n.body) : "";
     return `<article class="claim"${anchor(n)}>
       <div class="row"><h3>${esc(n.text || "Untitled claim")}</h3><span class="tags">${turnPill(n)}${gatePills(n, p)}</span></div>
-      <p class="sub">${esc(says)}</p>
-      <div class="claim-foot"><span class="sub">${esc(novelty(n))} · ${when(x)}</span>${threadActions(n)}</div>${details(n)}</article>`;
+      ${says ? `<p class="sub">${esc(says)}</p>` : ""}
+      <div class="claim-foot"><span class="sub">${novelty(n) ? esc(novelty(n)) + " · " : ""}${when(x)}</span>${threadActions(n)}</div>${details(n)}</article>`;
   };
   const plain = x => {
     const n = x.thread, ruled = n.bucket === "ruled";
@@ -850,14 +861,20 @@ function overview(p, d) {
   const recipe = live ? (p.launchers || {})[live.recipe]?.label || live.recipe : "", total = live?.settings?.rounds;
   const [tone, word] = !S.connected ? ["stop", "Disconnected"] : paused ? ["idle", "Paused"] : live ? ["work", "Running"] : ["idle", "Idle"];
   const frame = cur?.frame ? d.research.find(n => n.id === cur.frame) : null;
-  const doing = live && cur ? (cur.frame ? `Settling <b>[${esc(cur.frame)}]</b> ${esc(frame?.text || "")}` : "Widening: looking for places to look") : "";
+  const doing = live && cur ? (cur.frame ? `Working on <b>[${esc(cur.frame)}]</b> ${esc(frame?.text || "")}` : "Looking for places to look") : "";
+  S.workingOn = live && cur ? cur.frame : null;
+  const limit = live?.settings?.timeout_min, modelGates = new Set((p.config.gates || []).filter(g => !g.command).map(g => g.name));
+  const checks = d.research.reduce((sum, n) => sum + (n.history || []).filter(e => e.verdict && modelGates.has(e.gate)).length, 0);
+  const spent = d.loop.rounds.length ? `Spent so far: ${plural(d.loop.rounds.length, "research round")}${modelGates.size ? " and " + plural(checks, "checking round") : ""}, for ${d.research.filter(n => n.state === "established").length} established.` : "";
   const stop = d.loop.lastStop;
-  const facts = live ? [recipe, live.model, cur && `round ${cur.number}${Number.isInteger(total) && total > 0 ? " of " + total : total === 0 ? ", until stopped" : ""}`].filter(Boolean)
+  const facts = live ? [recipe, live.model, cur && `round ${cur.number}${Number.isInteger(total) && total > 0 ? " of " + total : total === 0 ? ", until stopped" : ""}`,
+      cur && `started ${ago(cur.ts).toLowerCase()}${limit ? `, ${limit} min limit` : ""}`].filter(Boolean)
     : [stop ? `${stop.text} ${ago(stop.ts).toLowerCase()}` : d.loop.rounds.length ? "" : "Nothing has run yet"].filter(Boolean);
   const status = `<section class="ov-status" aria-label="Loop status">
     <div class="ov-line"><span class="term-state" data-tone="${tone}"><i aria-hidden="true"></i><span>${word}</span></span>
       <span class="sub">${esc(facts.join(" · "))}</span></div>
     ${doing ? `<p class="ov-doing">${doing}</p>` : ""}
+    ${spent ? `<p class="sub">${esc(spent)}</p>` : ""}
     ${p.config.problem ? `<p class="sub" role="alert">${esc(cap(p.config.problem))}. The loop holds until the file is fixed.</p>` : ""}
     <div class="ov-controls">${live ? `<span class="loop-start">${stopButtons(live)}<button class="btn small ghost" type="button" data-loop-settings data-fk="loop-settings" aria-haspopup="dialog">Settings</button></span>` : startBar(p)}</div></section>`;
   // The funnel: one count per bucket, each a way into its group on Research.
@@ -875,7 +892,7 @@ function overview(p, d) {
   const gateBox = `<section class="box glass" aria-labelledby="gates-h"><h2 id="gates-h">Gates</h2>
     ${!gates.length ? empty("No gates: every result is a claim.") : `${p.config.default_gates ? '<p class="sub">The built-in refutation gate: a fresh round is shown only the claim and told to kill it.</p>' : ""}
     <ol class="rows">${gates.map((g, i) => `<li><span><span class="sub num">${i + 1}.</span> <b>${esc(g.name)}</b></span>
-      <span class="pill" title="${esc(g.command ? g.command.join(" ") : g.refute)}">${g.command ? "command" : "refuter"}</span></li>`).join("")}</ol>`}</section>`;
+      <span class="pill" title="${esc(g.command ? g.command.join(" ") : g.refute)}">${g.command ? "command" : g.rate ? "rater" : "refuter"}</span></li>`).join("")}</ol>`}</section>`;
   const u = d.update, text = u ? u.body || u.text || "" : "", date = u?.ts && new Date(u.ts);
   // A long handoff opens with its first paragraphs, so the rest of the Overview stays in view.
   const paras = text.split(/\n\s*\n/), long = text.length > 900, hk = "handoff:" + p.id, whole = !long || S.open.has(hk);
@@ -952,7 +969,7 @@ async function showRunInfo(button) {
   const {project, agent, session, round} = button.dataset;
   const sequence = ++detailsSequence;
   const params = new URLSearchParams({project, agent, session, round});
-  $("#run-info-round").textContent = `${agent} · Iteration ${round}`;
+  $("#run-info-round").textContent = `${agent} · Round ${round}`;
   body.textContent = "Loading invocation…";
   dialog.showModal();
   let previous = "";
@@ -1126,7 +1143,7 @@ function terminalPanel(p, round, launch, { rounds = [], compose = "", idle = "" 
       <textarea data-fk="terminal-say" rows="1" maxlength="4000" aria-label="Message to Claude" aria-describedby="say-hint" placeholder="Message Claude…">${esc(terminalDrafts.get(key) || "")}</textarea>
       <button class="btn small" type="submit">Send</button></form>
       <p class="term-hint" id="say-hint"><span data-say-hint>${sayHint(tone)}</span> <span class="nowrap">Enter sends · Shift+Enter adds a line</span></p>`
-    : '<p class="term-hint">This harness does not take messages while it runs.</p>';
+    : '<p class="term-hint">This agent cannot be messaged mid-round.</p>';
   const foot = launch?.alive ? (file ? "" : say) : compose;
   return `<section class="loop-console loop-term" aria-labelledby="term-h" data-console-key="${esc(key)}" data-project="${esc(p.id)}" data-agent="${esc(launch?.agent || "")}" data-session="${esc(launch?.session || "")}" data-file="${file ? "1" : ""}" data-alive="${!file && launch.alive ? "1" : ""}" data-state="${tone}">
     <header class="term-head"><div class="term-title"><h2 id="term-h">Terminal</h2><span class="term-who">${esc(file ? file.handle.name : launch.agent)}${!file && launch.model ? ` · <span class="term-model">${esc(launch.model)}</span>` : ""}</span>
@@ -1156,21 +1173,21 @@ async function sayToTerminal(form) {
 }
 
 /* ---------- loop settings: one dialog for everything that shapes a run (outside #view, so re-renders leave it alone) ---------- */
-const LOOP_DEFAULTS = { rounds: 4, timeout_min: 0, reply_wait: 120, keep_background: false, tools: "recipe" };
+const LOOP_DEFAULTS = { rounds: 4, timeout_min: 0, reply_wait: 120, keep_background: false, tools: "recipe", workers: 1 };
 const recipeList = p => Object.entries(p.launchers || {}).map(([id, x]) => [id, x.label || id]);  // [recipe name, what to call it]
 // What a plain "Start loop" will run: the saved settings, then the recipe's own values, then the defaults.
 function plannedRun(p) {
   const loop = p.config.loop && typeof p.config.loop === "object" ? p.config.loop : {}, ids = Object.keys(p.launchers || {});
   const id = loop.recipe && ids.includes(loop.recipe) ? loop.recipe : ids.length === 1 ? ids[0] : "";
   const own = (p.launchers || {})[id] || {}, pick = k => loop[k] ?? own[k] ?? LOOP_DEFAULTS[k];
-  return { id, label: own.label || id, model: loop.model || own.model || "", rounds: pick("rounds"), timeout: pick("timeout_min"),
+  return { id, label: own.label || id, model: loop.model || own.model || "", rounds: pick("rounds"), timeout: pick("timeout_min"), workers: pick("workers"),
     tools: own.takes_tools ? pick("tools") : "recipe" };
 }
 // Says only what differs from the plain default run: no time limit, the recipe's own tools.
 function runSummary(p) {
   const r = plannedRun(p);
   if (!r.id) return "Choose an agent in Settings to start.";
-  return [r.label, r.model, r.rounds === 0 ? "until stopped" : plural(r.rounds, "round"),
+  return [r.label, r.model, r.workers > 1 && `${r.workers} side by side`, r.rounds === 0 ? "until stopped" : plural(r.rounds, "round") + (r.workers > 1 ? " each" : ""),
     r.timeout && `${r.timeout} min a round`, r.tools === "wide" && "web and subagents"].filter(Boolean).join(" · ");
 }
 
@@ -1204,6 +1221,7 @@ function openSettings(p) {
     ids.map(([id, label]) => `<option value="${esc(id)}" ${id === planned.id ? "selected" : ""}>${esc(label)}</option>`).join("");
   const own = (p.launchers || {})[planned.id] || {};
   $("#ls-model").value = loop.model || "";
+  $("#ls-workers").value = String(loop.workers ?? own.workers ?? 1);
   $("#ls-rounds").value = loop.rounds ? loop.rounds : "";
   $("#ls-rounds-forever").checked = (loop.rounds ?? own.rounds) === 0;
   $("#ls-timeout-off").checked = !(loop.timeout_min ?? own.timeout_min);
@@ -1242,6 +1260,7 @@ $("#ls-form").addEventListener("submit", async e => {
   if (Number.isNaN(timeout)) return fail("The time limit must be a whole number of minutes from 1 to 1440, or No limit."), $("#ls-timeout").focus();
   if (Number.isNaN(reply)) return fail("The reply window must be a whole number of seconds from 1 to 3600, or None."), $("#ls-reply").focus();
   if (rounds !== undefined && rounds !== own.rounds) loop.rounds = rounds;
+  if (Number($("#ls-workers").value) !== (own.workers ?? 1)) loop.workers = Number($("#ls-workers").value);
   if (own.takes_tools && $("#ls-tools").value !== (own.tools || LOOP_DEFAULTS.tools)) loop.tools = $("#ls-tools").value;
   if (timeout !== undefined && timeout !== (own.timeout_min ?? LOOP_DEFAULTS.timeout_min)) loop.timeout_min = timeout;
   if (reply !== undefined) loop.reply_wait = reply;
@@ -1321,7 +1340,7 @@ async function refreshTerminal() {
     if (!panel.isConnected) return;
     // Normalize console styling and carriage-return progress lines without interpreting markup.
     text = text.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "").replace(/\r\n/g, "\n").replace(/[^\n\r]*\r/g, "");
-    const info = clipped ? "Showing the latest 64 KiB" : !text ? "Waiting for terminal output…" : file || panel.dataset.alive === "1" ? "Live output" : "Output from the last run";
+    const info = clipped ? "Showing the most recent output only" : !text ? "Waiting for terminal output…" : file || panel.dataset.alive === "1" ? "Live output" : "Output from the last run";
     const pre = panel.querySelector("[data-console-text]");
     // A fresh render already drew the cached text; redraw only when the text changed, and never under the reader's selection.
     if (terminalDrawn.el !== pre && terminalView.key === key && terminalView.text === text) terminalDrawn = { el: pre, text };
@@ -1352,7 +1371,7 @@ async function refreshTerminal() {
 }
 
 // A closing note ends with labelled lines after "Handoff:": Results, Ruled out, Leads, Decision needed, Next. Each holds text or bullet lines, or "none".
-const HANDOFF_LABEL = /^\s*(?:[-*]\s+)?(?:\*\*)?(Results|Ruled out|Leads|Decision needed|Next)(?:\*\*)?\s*:(?:\*\*)?\s*(.*)$/i;
+const HANDOFF_LABEL = /^\s*(?:[-*]\s+)?(?:\*\*)?(Results|Ruled out|Assumed|Leads|Decision needed|Next)(?:\*\*)?\s*:(?:\*\*)?\s*(.*)$/i;
 function parseHandoff(text) {
   const lead = [], parts = [];
   for (const line of String(text || "").replace(/\r/g, "").split("\n")) {
@@ -1463,7 +1482,7 @@ function liveLoop(p, d) {
   const running = (p.launched || []).filter(x => x.alive).map(x => x.agent);
   const compose = startBar(p);
   const idle = `<p><b>${lastStop ? esc(lastStop.text) : rounds.length ? "No worker is running from this page." : "Nothing has run yet."}</b>${lastStop ? ` <span class="sub">${esc(ago(lastStop.ts).toLowerCase())}</span>` : ""}</p>
-    ${recipeList(p).length ? "<p class=\"sub\">Start a loop below. Claude's session streams here, and you can message it while it works.</p>" : ""}`;
+    ${recipeList(p).length ? "<p class=\"sub\">Start a loop below. The agent's output streams here.</p>" : ""}`;
   const heading = !S.connected ? '<p class="state-line">Disconnected · showing saved events</p>' : p.hold ? `<p class="state-line">${esc(cap(p.hold))}</p>` : "";
   const terminalFor = round => { const launch = terminalLaunch(p, round); return { launch, html: terminalPanel(p, round, launch, { rounds, compose, idle }) }; };
   if (!rounds.length) return heading + terminalFor(null).html;
@@ -1480,10 +1499,10 @@ function liveLoop(p, d) {
   const figures = r => { const f = roundFigures(r); return f.length ? ` · <span class="loop-figs">${esc(f.join(" · "))}</span>` : ""; };
   const subject = r => (r.hasHandoff && handoffHeadline(r.handoff)) || r.focus?.title || r.updates[r.updates.length - 1]?.title ||
     (r.apiError ? "Harness reported an API error" : r.state === "Failed" ? "Harness exited with an error" :
-      r.hasOutput ? "Round output saved" : r.state ? "Ended without a handoff" : r.frame ? `Settling [${r.frame}]` : "Widening");
+      r.hasOutput ? "Round output saved" : r.state ? "Ended without a handoff" : r.frame ? `Working on [${r.frame}]` : "Looking for places to look");
   const card = r => `<button class="loop-round" data-loop-round="${r.key}" data-fk="round:${r.key}" aria-pressed="${r === round}">
     <span class="row"><strong>${esc(subject(r))}</strong><span class="sub ${r.state === "Failed" ? "t-err" : ""}">${esc(status(r))}</span></span>
-    <span class="sub">${esc(r.agent)} · Iteration ${esc(r.number)}${r.frame ? ` · frame ${esc(r.frame)}` : ""} · ${esc(stamp(r.ts))}${figures(r)}</span></button>`;
+    <span class="sub">${esc(r.agent)} · Round ${esc(r.number)}${r.frame ? ` · frame ${esc(r.frame)}` : ""} · ${esc(stamp(r.ts))}${figures(r)}</span></button>`;
   // Runs of two or more rounds that recorded nothing new fold into one line. A failed round,
   // the selected round and a round still running always stay visible.
   const quiet = r => {
@@ -1521,17 +1540,17 @@ function liveLoop(p, d) {
   const { launch, html: terminal } = terminalFor(round);
   const infoInTerminal = launch && launch.session === round.session && (pinnedRounds.has(p.id) || !attachedLogs.has(p.id));
   const info = infoInTerminal ? "" : runInfoButton(p, round.agent, round.session, round.number);
-  return heading + terminal + `<article class="loop-work"><header><p class="sub">${esc(round.agent)} · Iteration ${esc(round.number)} · ${esc(status(round))}${figures(round)} ${info}</p>
-    <h2>${round.handoff ? (round.apiError ? "Harness error" : round.hasHandoff ? "Round handoff" : "Final output") : focus ? esc(subject(round)) : round.state ? "No handoff was saved" : "Awaiting final output"}</h2></header>
+  return heading + terminal + `<article class="loop-work"><header><p class="sub">${esc(round.agent)} · Round ${esc(round.number)} · ${esc(status(round))}${figures(round)} ${info}</p>
+    <h2>${round.handoff ? (round.apiError ? "Harness error" : round.hasHandoff ? "Round handoff" : "Final output") : focus ? esc(subject(round)) : round.state ? "No handoff was saved" : `Round ${esc(round.number)} in progress`}</h2></header>
     ${round.handoff ? handoffHTML(round.handoff) : ""}
     ${details ? `<dl class="kv">${details}</dl>` : ""}
     ${!focus && round.apiError ? '<p>The harness returned an error before it published a work update.</p>' : ""}
-    <div class="sub">Last report ${esc(clock(last.ts))} · ${esc(ago(last.ts))}</div></article>
+    <div class="sub">${round.handoff || round.state ? "Last report" : "Started"} ${esc(clock(last.ts))} · ${esc(ago(last.ts))}</div></article>
     ${round.updates.length ? `<h2 class="mt2">Reported work</h2>${paged("updates:" + round.key, [...round.updates].reverse(), 8, updateRow, html => `<ol class="loop-updates">${html}</ol>`)}` : ""}
     <details class="loop-console" data-keep-details="${esc(logKey)}" ${S.open.has(logKey) ? "open" : ""}><summary>Recorded events</summary>
-    <div class="loop-output" tabindex="0" aria-label="Iteration log" data-keep="${esc(JSON.stringify([p.id, round.key]))}" data-tail>
+    <div class="loop-output" tabindex="0" aria-label="Round log" data-keep="${esc(JSON.stringify([p.id, round.key]))}" data-tail>
     ${round.lines.map(line => `<div class="loop-line"><time datetime="${esc(line.ts)}">${esc(clock(line.ts))}</time><span>${esc(line.text)}</span></div>`).join("")}</div></details>
-    <div class="row mt2"><h2>Iteration history</h2>${pin !== undefined ? '<button class="btn small ghost" data-loop-follow>Follow latest</button>' : '<span class="sub">Following latest</span>'}</div>` +
+    <div class="row mt2"><h2>Round history</h2>${pin !== undefined ? '<button class="btn small ghost" data-loop-follow>Follow latest</button>' : '<span class="sub">Following latest</span>'}</div>` +
     paged("loop-history", history, 15, x => x.quiet ? quietRow(x.quiet) : card(x), html => `<div class="result-list">${html}</div>`);
 }
 
