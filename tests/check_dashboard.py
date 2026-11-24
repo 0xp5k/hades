@@ -301,13 +301,13 @@ def check(directory):
             assert [p["id"] for p in projects] == ["workspace"]
             with urlopen(base + "/", timeout=3) as page:
                 html = page.read().decode()
-            # The page is a viewer: it reads these, and writes only a launch, a stop, the loop settings and the audited mark.
+            # The page is a viewer: it reads these, and writes only a launch, a stop and the loop settings. It writes nothing to the record.
             assert 'id="view"' in html
             for read in ("/api/projects", "/api/events?project=", "/api/research?project=", "/api/terminal?", "/api/run-details?"):
                 assert read in html, read
             wrote = set(re.findall(r'"(/api/[a-z/-]+)"', html)) - {"/api/projects"}
-            assert wrote == {"/api/launch", "/api/stop", "/api/project", "/api/events"}, wrote
-            for gone in ("/api/terminal/send", "/api/frames", "/api/new", "reply_wait", "priority:", "direction:", "paused:", "answer:", "Iteration "):
+            assert wrote == {"/api/launch", "/api/stop", "/api/project"}, wrote
+            for gone in ("/api/terminal/send", "/api/frames", "/api/new", "reply_wait", "priority:", "direction:", "paused:", "answer:", "audited", "Iteration "):
                 assert gone not in html, gone
             with urlopen(base + "/AGENTS.md", timeout=3) as guide:
                 assert b"/api/status" in guide.read()
@@ -347,13 +347,9 @@ def check(directory):
                 claim = get("/api/events", {"project": "workspace", "type": "research", "status": "supported", "agent": "fixture",
                                             "text": "The parser drops the last line"})["id"]
                 threads = {n["id"]: n for n in get("/api/research?project=workspace")}
-                assert {"bucket", "place", "working", "state", "at", "standing", "attempts", "budget", "audited", "history"} <= set(threads[frame]), sorted(threads[frame])
+                assert {"bucket", "place", "working", "state", "at", "standing", "attempts", "budget", "history"} <= set(threads[frame]), sorted(threads[frame])
                 assert (threads[frame]["bucket"], threads[frame]["place"], threads[frame]["working"]) == ("queued", 1, None), threads[frame]
                 assert threads[claim]["bucket"] == "waiting" and threads[claim]["at"] and threads[claim]["place"] is None, threads[claim]
-                # The audited mark, the page's one write to the record: set, then removed.
-                for on in (True, False):
-                    get("/api/events", {"project": "workspace", "type": "research", "id": claim, "audited": on, "source": "you"})
-                    assert next(n for n in get("/api/research?project=workspace") if n["id"] == claim)["audited"] is on
                 # The settings dialog sends only these keys; the server keeps them, and refuses one it does not know.
                 loop = {"rounds": 3, "timeout_min": 20, "workers": 2, "spend": 12, "keep_background": True, "model": "sonnet"}
                 get("/api/project", {"project": "workspace", "loop": loop})

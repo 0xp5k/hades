@@ -124,6 +124,7 @@ def check():
         (home / "project.json").write_text(json.dumps({"goal": "Crash the parser", "artifact": "the path of a file holding the crashing input",
             "lock": ["scope.md", "replay.py"], "gates": [{"name": "reproduces", "command": [sys.executable, "{project}/replay.py"]},
                                                          {"name": "not known", "refute": "Look for an earlier report of this fault. Cite it if you find one."},
+                                                         {"name": "replays twice", "command": [sys.executable, "{project}/replay.py"], "required": False},
                                                          {"name": "matters", "rate": "How much would a maintainer care?"}]}))
         text = http("/api/brief?project=self-check-gated&agent=self-check")
         need("PASSES THE GATES, in this order: reproduces, not known." in text and "- matters: a separate round that says how much" in text and "[check: <artifact>]" in text, "the brief does not explain the gates")
@@ -139,17 +140,20 @@ def check():
         need(done.returncode == 0, f"loop.py exited with {done.returncode}: {(done.stdout + done.stderr)[-300:]}")
         now = {n["text"]: n for n in http("/api/research?project=self-check-gated")}
         stand = {text: (n["state"], n["at"], n["standing"]) for text, n in now.items() if n["status"] != "open"}
-        need(stand == {"The length field overflows": ("established", None, 3), "The footer overflows": ("failed", "not known", 1),
+        need(stand == {"The length field overflows": ("established", None, 4), "The footer overflows": ("failed", "not known", 1),
                        "The trailer overflows": ("failed", "reproduces", 0), "The header is odd": ("unchecked", "reproduces", 0)}, f"unexpected standing: {stand}")
         need(now["The length field overflows"]["rating"] == 4, "the rater's word did not reach the established claim")
         text = http("/api/brief?project=self-check-gated&agent=self-check")
-        frame, later = text.partition("THIS ROUND'S FRAME")[2], text.partition("ALSO QUEUED")[2].partition("RULED OUT")[0]
+        frame, later = text.partition("A PLACE TO START")[2], text.partition("ALSO QUEUED")[2].partition("RULED OUT")[0]
         need("ESTABLISHED" in text and "issue 12" in text and "tokenizer" in frame.partition("ALSO QUEUED")[0], "the next brief does not lead with the fresh lead ahead of a claim a refuter stopped")
         need("tokenizer" not in later and all(x in text.partition("STOPPED AT A GATE")[2].partition("ALSO QUEUED")[0] for x in ("footer", "trailer")), "the brief does not separate what is queued from what a gate stopped")
+        # An extra check: not required, run only on what is established, and its verdict sits beside the required ones.
+        extra = (now["The length field overflows"]["gates"].get("replays twice") or {}).get("verdict")
+        need(extra == "passed" and "replays twice" not in now["The footer overflows"]["gates"], f"the extra check did not run on the established claim alone: {extra}")
         (home / "scope.md").write_text("Only faults reachable over the network.\n")  # the person changes the question
         state = {n["text"]: n["state"] for n in http("/api/research?project=self-check-gated")}
         need(state["The length field overflows"] == "waiting", "a verdict outlived a change to the locked question")
-        return "gates in order, a refuter round, a rating, the queue, and a stale verdict"
+        return "gates in order, a refuter round, an extra check, a rating, the queue, and a stale verdict"
 
     steps = [("The page loads", page), ("A project is created", project), ("A report is accepted and a malformed one refused", report),
              ("The brief is written", brief), ("The loop runs a round", loop), ("The round's handoff becomes the record", memory),

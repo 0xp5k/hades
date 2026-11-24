@@ -579,11 +579,21 @@ RATING = re.compile(r"^\s*(?:[-*]\s+)?\**\s*rating\s*\**\s*:\s*\**\s*([1-5])\b",
 VERDICT = re.compile(r"^\s*(?:[-*]\s+)?\**\s*verdict\s*\**\s*:\s*\**\s*(refuted|known|stands)\b(?!\s*\**\s*[-:]?\s*<)", re.I | re.M)
 
 
+def over(query):
+    """Why this loop should start no more model rounds, or None: the launch it belongs to has used its spend limit. The
+    server keeps the one count, so the limit holds for every loop of the launch, including ones added later."""
+    try:
+        return json.loads(call("/api/project?" + query)).get("over")
+    except (OSError, ValueError, AttributeError):
+        return None
+
+
 def run_gates(a, query, command):
     """Run the project's gates on what the round claimed. The server names, for each claim with an artifact, the next gate
     it has not passed; passing one makes the next due, so ask again until nothing is. A command gate passes on exit code
     0. A refuter gate passes when a fresh round, shown only the claim, ends with "Verdict: stands"; "refuted" fails it,
-    and "known" fails it for good (what is already known cannot be repaired). A gate that cannot start, runs out of time
+    and "known" fails it for good (what is already known cannot be repaired). An extra check is a gate the project
+    marked as not required: it is run the same way, on a claim the required gates have already established. A gate that cannot start, runs out of time
     or (a refuter) gives no verdict is an error. Each verdict goes on the claim's thread."""
     done, silent = set(), 0
     for _ in range(10):  # at most this many gates deep
@@ -599,9 +609,8 @@ def run_gates(a, query, command):
             if not isinstance(item.get("command"), list):
                 # Every claim is settled before the next research round, so that round's brief carries the verdicts. A harness
                 # that twice gives no verdict is not one that can refute (a plain script, say): leave the rest due.
-                if silent >= 2 or (a.max_spend and a.spent >= a.max_spend):
+                if silent >= 2 or over(query):
                     continue
-                a.spent += 1
             artifact, limit, rating = str(item.get("artifact") or ""), float(item.get("timeout_min") or 10) * 60, None
             # A gate runs in the folder the claim's round worked in, where its artifact was left, whichever loop runs it.
             where = item.get("cwd") if isinstance(item.get("cwd"), str) and os.path.isdir(item["cwd"]) else None
@@ -673,7 +682,6 @@ def run_loop():
     p.add_argument("--pause", type=float, default=5, help="seconds between rounds (default 5)")
     p.add_argument("--no-notes", action="store_true", help="do not save each round's output to the project's Round notes page")
     p.add_argument("--keep-background", action="store_true", help="leave processes the agent started running between rounds; they still end when a round hits its time limit or the loop stops")
-    p.add_argument("--max-spend", type=int, default=0, help="stop once this many model rounds have been used, research and checking rounds together (default: no limit)")
     # Split at the first "--" ourselves, so the harness command can contain any flags it likes.
     argv = sys.argv[1:]
     cut = argv.index("--") if "--" in argv else len(argv)
@@ -700,11 +708,10 @@ def run_loop():
         f"up to {a.max_iterations} rounds" if a.max_iterations else "rounds until stopped",
         f"for at most {a.max_hours:g} hours" if a.max_hours else "",
         f"{a.timeout_min:g} min limit per round" if a.timeout_min else "no time limit per round",
-        f"at most {a.max_spend} model rounds in all" if a.max_spend else "",
         "keeps background processes between rounds" if a.keep_background else "stops background processes when a round ends",
         f"model {a.model}" if a.model else ""])), flush=True)
     query = urllib.parse.urlencode({"project": a.project, "agent": a.agent})
-    started, n, failures, a.spent = time.time(), 0, 0, 0  # spent: model rounds used by this run, research and checking together
+    started, n, failures = time.time(), 0, 0
     finish = lambda text: say(a, text)
 
     while True:
@@ -712,8 +719,6 @@ def run_loop():
             return finish("Loop stopped: found a STOP file")
         if a.max_iterations and n >= a.max_iterations:
             return finish(f"Loop stopped: reached {a.max_iterations} rounds")
-        if a.max_spend and a.spent >= a.max_spend:
-            return finish(f"Loop stopped: reached its spend limit of {a.max_spend} model rounds")
         if a.max_hours and time.time() - started > a.max_hours * 3600:
             return finish(f"Loop stopped: reached {a.max_hours:g} hours")
         try:
@@ -722,6 +727,8 @@ def run_loop():
                 print(f"[loop] on hold: {state['hold']}; checking again in 15 s", flush=True)
                 time.sleep(15)
                 continue
+            if state.get("over"):  # the launch this loop belongs to has used its spend limit
+                return finish(f"Loop stopped: {state['over']}")
             brief, frame = call("/api/brief?" + query + "&as=json"), None
             try:  # the server also says which frame it gave the round, so the round's note can be counted against it
                 given = json.loads(brief)
@@ -734,7 +741,6 @@ def run_loop():
             continue
 
         n += 1
-        a.spent += 1
         # Where it is working, and for how long: neither is in the record, and both change what a round should do.
         # The next round knows only the handoff and this folder, so both are where anything worth keeping has to go.
         brief += (f"\nYou are working in {os.getcwd()}. It persists: earlier rounds' files are here, the next round starts from what you leave "

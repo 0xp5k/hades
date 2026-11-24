@@ -33,6 +33,7 @@ agents themselves.
 - **Frame**: a place to look, not yet settled.
 - **Claim**: what a round says it found. **Ruled out**: a frame that was examined and had nothing.
 - **Gate**: a test a claim must pass. **Established**: a claim that passed every gate.
+- **Extra check**: a gate that is not required. It runs only on what is established and never stops a claim.
 - **Round**: one run of the agent. **Handoff**: the block it ends with.
 - **Assumption**: something a round decided in your place.
 
@@ -42,8 +43,9 @@ These are the only words the brief, the digest, the page and this guide use for 
 
 1. The loop stops if it has reached its rounds, its hours or its spend limit, or a file named `STOP` is in its folder.
    It waits while the project is paused.
-2. It fetches the brief. While a frame is queued the round is given that one frame to settle; when none is, the round
-   is free to find what is worth finding.
+2. It fetches the brief. The round chooses where to go. The first frame in the queue is offered as a place to start,
+   and the other queued frames are listed as leads it may take instead. Only a frame the person put first is one the
+   round is told to start on.
 3. It runs the agent's command with the brief on standard input (`{brief_file}` and `{brief}` in an argument are
    replaced with a file holding it and with the text). Nothing is sent to a round after its brief.
 4. It saves the round's output from its last `Handoff:` marker on as that round's **note**. The record is made from it.
@@ -114,6 +116,14 @@ so a round cannot change them through the server.
 - **A rater.** `"rate"` in place of `"refute"`. It ends `Rating: 1-5`. It never stops a claim; it orders what is
   established, and runs after everything else.
 
+**Extra checks.** Add `"required": false` to a command or a refuter and it becomes an extra check: another verifier
+that is not part of what every claim must pass. It runs only on claims the required gates have established, and
+whatever it says the claim stays established. Its verdict is shown beside the others, and it adds a count of its own
+beside Established: the established claims that also passed it. Use it for a stronger test that only some results will meet: the proof also checks
+formally, the fault also reproduces on the release build, the fix also passes the project's tests.
+
+    {"name": "formal proof", "command": "python3 {project}/lean.py", "required": false}
+
 A refuter or rater may name a `"recipe"` from `launchers.json` to run on a different agent: another model's check, or
 one with web access.
 
@@ -125,9 +135,6 @@ the same cost put the one that rejects most first.
 and its verdicts are stale; change a locked file and all are. A verdict counts only for the artifact the claim names
 now.
 
-**Your audit.** Mark as audited records that you looked at a claim yourself. It lapses when the artifact, the gates or
-the locked files change.
-
 Good gates, cheapest first: *it is true* (replay under a sanitizer in a clean container, build the proof, rerun from
 the seed); *it is the thing asked*; *it is new* (a refuter that must cite the earlier report); *it is usable*. A gate
 sees the artifact name as the agent wrote it, so treat it as untrusted, and run what a round produced in a container
@@ -135,8 +142,7 @@ when it could do harm.
 
 ## Running it
 
-A project runs one launch at a time. Loop settings live in `project.json` under `loop` and are set from Settings or
-`POST /api/project`:
+Loop settings live in `project.json` under `loop` and are set from Settings or `POST /api/project`:
 
 | Setting | Values | Default |
 |---|---|---|
@@ -150,8 +156,15 @@ A project runs one launch at a time. Loop settings live in `project.json` under 
 
 With `workers` above 1 a launch starts that many loops of the recipe (`<recipe>-1`, `<recipe>-2`). They share the
 record and nothing else: each has its own folder, is given a different frame, and runs the gates on its own claims.
-The spend limit is split between them. Hades has no clock: to run more at night, have an assistant or a scheduler send
-the launch then.
+
+**Adding and removing loops while it runs.** Add a loop on the Overview, or `POST /api/launch {"project", "add": true}`,
+starts one more loop beside those running and leaves them as they are, up to four on a project. It runs under the
+same settings unless you send others, and `"recipe"` there starts a different agent beside the first, which is how to
+put a second model on the same record. `POST /api/stop {"project", "agent": "<name>"}` stops one and leaves the rest.
+
+**One spend limit.** The server counts the model rounds a launch has used and every loop asks before each one, so the
+limit holds however many loops there are and whenever they joined. It can be passed by the rounds already under way
+when it is reached. Hades has no clock: to run more at night, have an assistant or a scheduler send the launch then.
 
 A recipe in `launchers.json` has `command` (the argument list run each round), and optionally `label`, `models`,
 `rounds` and `timeout_min`. Tools and permissions are whatever the command says. A direct `claude -p` command is shown
@@ -165,8 +178,25 @@ To run the loop yourself, from the folder the agent should work in:
 
 Four pages. **Overview**: whether it is running, what it is doing, what is established, what it cost. **Research**:
 every frame and claim in the group the record puts it in, with each gate's verdict. **Live**: the loop's output as it
-happens, and each earlier round's handoff. **Write-ups**: see below. The controls are Start, Stop, Settings, Mark as audited and Copy for
+happens, and each earlier round's handoff. **Write-ups**: see below. The controls are Start, Stop, Add a loop, Settings and Copy for
 Claude. Everything else is done through an assistant.
+
+**When the record gets long.** A group with more than eight items is drawn as tight rows, twenty at a time, with
+Show more and Show all. Each tight row shows only what tells it apart: the gate it stopped or waits at, what the extra
+checks said, its rating. Ruled out, Set aside and Dropped start closed once they are long. Past two dozen items the
+Research page gets a bar of group names that stays in view and jumps to each. Search narrows every group at once. The
+brief and the digest cut their lists short too, and say how many they left out.
+
+**Digging into one claim.** Details shows each gate's last line, with the rest of its output one press away, and
+Show the file shows the claim's artifact as it is on disk (text up to 64 kB, and only from the project's own working
+folders).
+
+**Handing a result to someone else.** Copy as report, on an established claim, copies it written up in Markdown: what
+was found, the input, the command that shows it again, and what each gate said. The server assembles it from the
+record, so no model spends a round on it, and this machine's paths are taken out.
+
+**Since you last looked.** When you come back to the Overview it says what changed while you were away: how many more
+are established, stopped, ruled out, and how many rounds ran. The earlier counts are kept in your browser only.
 
 **Run details** beside the terminal shows the command and the exact text given to the agent for a round.
 
@@ -185,16 +215,18 @@ document. A write-up is not part of the record: no round reads it and no gate ch
 | `GET  /api/project?project=X`, `/api/projects` | Config; every project with its running loops and recipes |
 | `GET  /api/gates?project=X&agent=NAME` | What the loop should run next |
 | `GET  /api/writeup?project=X&name=N` | One write-up, with its text |
+| `GET  /api/artifact?project=X&id=K` | The file a claim names as its artifact, for reading |
+| `GET  /api/report?project=X&id=K` | One established result written up in Markdown, from the record |
 | `POST /api/frames` | Queue places to look |
 | `POST /api/events` | An `activity`, a `note`, a `question`, or `research` |
 | `POST /api/project` | Set `goal`, `rules`, `target`, `direction`, `paused` or `loop` |
 | `POST /api/new` | Create a project: `{"project", "goal", "target", "agent_files"}` |
-| `POST /api/launch`, `/api/stop` | Start and stop the project's loops |
+| `POST /api/launch`, `/api/stop` | Start and stop the project's loops; `"add": true` starts one more, `"agent"` stops one |
 
 `/api/research` returns each thread with `status` (`open` a frame, `supported` a claim, `contradicted` ruled out,
 `superseded` dropped), its `gates` verdicts (each with `live`: whether it still counts), and where it stands: `bucket`
 (established, stopped, waiting, unchecked, ruled, queued, aside, dropped), `state`, `at`, `standing`, `rating`,
-`audited`, `place` in the queue, and `working` (the agent on it now).
+`place` in the queue, and `working` (the agent on it now).
 
 Writes must be JSON from this machine; a request from another site is refused.
 
@@ -216,10 +248,9 @@ name in a recipe is looked up on PATH first, so `claude.cmd` shims start without
 ## Known limits
 
 - An agent with a shell on this machine can write to the record as anyone and can edit a gate or a locked file. Nothing
-  here is a security boundary between the agent and the record. For a result that matters, run the gates yourself, then
-  mark it audited.
-- A verdict and your audit are about an artifact by name. If the file's contents change afterwards, nothing notices
+  here is a security boundary between the agent and the record. For a result that matters, run the gates yourself.
+- A verdict is about an artifact by name. If the file's contents change afterwards, nothing notices
   until the claim is made again.
 - A refuter is a model judging a model. A claim it lets through has only failed to be killed.
-- Spend is counted in model rounds, not tokens or money.
+- Spend is counted in model rounds, not tokens or money, and only for loops started from the page or the API.
 - If `project.json` stops being valid JSON the loop holds and says why. That is the one thing it waits for.

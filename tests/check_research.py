@@ -1,6 +1,7 @@
 """Exercise the person's standing direction, research priority, the handoff record and terminal messages through the HTTP API, without a model.
 
 A stand-in `claude` replies to each round at once, so a launched worker can be messaged and restarted for real."""
+import datetime as dt
 import json
 import os
 from pathlib import Path
@@ -167,7 +168,7 @@ def check(directory):
             refused("/api/events", {"project": project, "type": "research", "id": "len", "priority": True})  # an agent's partial update
             # A focused round is given one frame: the oldest open one. The rest are titles; a claim the person marked says so.
             text = brief(project)
-            frame = text.partition("THIS ROUND'S FRAME (round 1 of 3 on it)")[2]
+            frame = text.partition("A PLACE TO START (round 1 of 3 on it; no other loop is on it)")[2]
             assert "- [old] Older lead" in frame and "Next test: Fuzz the footer" in frame, text
             assert "a Results line that starts with [old], or" in frame and "a Ruled out line that starts with [old]" in frame, frame
             assert "Work as if this frame pays off" not in text  # nothing here can say no, so nothing is assumed
@@ -177,7 +178,7 @@ def check(directory):
             plan = call(f"/api/brief?project={project}&agent=a1&as=json")
             assert plan["frame"] == "old" and plan["brief"] == text
             ev(id="new", priority=True, source="you")  # Pursue: the person's mark goes to the front
-            marked = brief(project).partition("THIS ROUND'S FRAME (round 1 of 3 on it; the person marked it)")[2]
+            marked = brief(project).partition("A PLACE TO START (round 1 of 3 on it; the person marked it: start here)")[2]
             assert "- [new] Newest lead" in marked, brief(project)
             ev(id="new", priority=False, source="you")
         ev = lambda **k: call("/api/events", {"project": "plain", "type": "research", **k})
@@ -189,7 +190,7 @@ def check(directory):
         # 1. The brief asks for the work and the handoff only: no commands to run, nothing to report.
         lean = brief("lean")
         for expected in ("RULED OUT (do not retry without a new reason", "- Footer overflows (why: footer is bounds-checked)",
-                         "Next test: Fuzz the footer", "This round has one frame to settle, named at the end of this brief.", "Nobody is watching.",
+                         "Next test: Fuzz the footer", "This round is yours: go where you think the most is to be found. The end of this brief names a place to start if nothing better calls; what you do not get to goes on Leads lines.", "Nobody is watching.",
                          "every result you report is a claim", "TARGET: parser.c", "RULES: Stay local."):
             assert expected in lean, (expected, lean)
         for absent in ("POST", "curl", "http://", "checker", "verifier", "task"):
@@ -377,7 +378,7 @@ def check(directory):
             out = launch()  # everything from the project's saved settings
             assert out["recipe"] == "wrap" and out["settings"] == {"rounds": 7, "timeout_min": 0, "keep_background": True, "workers": 1, "spend": 40, "model": "other"}, out
             argv = argv_of("lean", out["started"][0])
-            assert (flag(argv, "--max-iterations"), flag(argv, "--timeout-min"), flag(argv, "--max-spend")) == ("7", "0", "40") and "--reply-wait" not in argv and "--interactive" not in argv and "--keep-background" in argv
+            assert (flag(argv, "--max-iterations"), flag(argv, "--timeout-min")) == ("7", "0") and "--max-spend" not in argv and "--reply-wait" not in argv and "--interactive" not in argv and "--keep-background" in argv
             assert flag(argv, "-m") == "other" and flag(argv, "--agent") == "wrap-1"
             entry = next(x for x in next(p for p in call("/api/projects") if p["id"] == "lean")["launched"] if x["agent"] == out["started"][0])
             assert entry["settings"] == out["settings"]
@@ -393,6 +394,31 @@ def check(directory):
             assert [flag(argv_of("lean", a), "--agent") for a in out["started"]] == ["fake-1", "fake-2"]
             assert sorted(call("/api/stop", {"project": "lean"})["stopped"]) == ["fake-1", "fake-2"]
             refused("/api/launch", {"project": "lean", "recipe": "fake", "workers": 5})
+            # Adding a loop: one more beside those running, which keep running. It takes the running launch's settings, the
+            # next free name, and may be a different recipe. One can be stopped on its own.
+            out = launch(recipe="fake", rounds=2)
+            first = argv_of("lean", "fake-1")
+            more = call("/api/launch", {"project": "lean", "add": True})
+            assert more["started"] == ["fake-2"] and more["running"] == ["fake-1", "fake-2"] and more["settings"]["rounds"] == 2, more
+            assert flag(argv_of("lean", "fake-2"), "--max-iterations") == "2"
+            other = call("/api/launch", {"project": "lean", "add": True, "recipe": "wrap"})
+            assert other["started"] == ["wrap-1"] and other["running"] == ["fake-1", "fake-2", "wrap-1"] and flag(argv_of("lean", "wrap-1"), "-m") == "base-model", other
+            live = {x["agent"] for x in next(p for p in call("/api/projects") if p["id"] == "lean")["launched"] if x["alive"]}
+            assert live == {"fake-1", "fake-2", "wrap-1"} and argv_of("lean", "fake-1") == first, live
+            assert call("/api/stop", {"project": "lean", "agent": "fake-2"})["stopped"] == ["fake-2"]
+            again = call("/api/launch", {"project": "lean", "add": True})  # the freed name is the next free one
+            assert again["started"] == ["fake-2"], again
+            call("/api/launch", {"project": "lean", "add": True})
+            refused("/api/launch", {"project": "lean", "add": True})  # four side by side is the most
+            try:
+                call("/api/launch", {"project": "lean", "recipe": "fake"})
+                raise AssertionError("a launch without add started over running loops")
+            except HTTPError as error:
+                assert '"add": true' in json.loads(error.read())["error"]
+            assert len(call("/api/stop", {"project": "lean"})["stopped"]) == 4
+            alone = call("/api/launch", {"project": "lean", "add": True, "recipe": "fake"})  # with nothing running, adding starts one
+            assert alone["started"] == ["fake-1"] and alone["running"] == ["fake-1"], alone
+            call("/api/stop", {"project": "lean"})
             call("/api/project", {"project": "lean", "loop": {}})  # cleared: the recipe's own fields, then the defaults
             assert config("lean")["loop"] == {}
             refused("/api/launch", {"project": "lean"})  # three recipes and none chosen
@@ -403,7 +429,7 @@ def check(directory):
             out = launch()
             assert out["recipe"] == "bare" and out["settings"]["rounds"] == 4 and out["settings"]["timeout_min"] == 0
             argv = argv_of("lean", out["started"][0])
-            assert flag(argv, "--max-spend") == "0" and flag(argv, "--timeout-min") == "0"  # research has no time limit by default
+            assert flag(argv, "--timeout-min") == "0"  # research has no time limit by default
             call("/api/project", {"project": "lean", "loop": {"rounds": 0}})  # rounds 0: until stopped
             out = launch()
             assert out["settings"]["rounds"] == 0 and flag(argv_of("lean", out["started"][0]), "--max-iterations") == "0"
@@ -414,10 +440,10 @@ def check(directory):
             wide = brief("style", "solo")
             for expected in ("Nothing is queued, so this round is yours", "however you see fit", "Leads lines"):
                 assert expected in wide, (expected, wide)
-            assert "THIS ROUND'S FRAME" not in wide and call("/api/brief?project=style&agent=solo&as=json")["frame"] is None
+            assert "A PLACE TO START" not in wide and call("/api/brief?project=style&agent=solo&as=json")["frame"] is None
             queued = call("/api/frames", {"project": "style", "frames": [{"text": "the tokenizer on nested brackets", "score": 2, "next": "time a deep input"}]})["added"]
             narrow = brief("style", "solo")
-            assert "This round has one frame to settle" in narrow and "this round is yours" not in narrow and f"- [{queued[0]}] the tokenizer" in narrow.partition("THIS ROUND'S FRAME (round 1 of 2 on it)")[2]
+            assert "This round is yours: go where" in narrow and "Nothing is queued" not in narrow and f"- [{queued[0]}] the tokenizer" in narrow.partition("A PLACE TO START (round 1 of 2 on it; no other loop is on it)")[2]
             call("/api/project", {"project": "style", "loop": {"recipe": "bare"}})
             out = launch("style")
             assert out["started"] == ["bare-1"] and "style" not in out["settings"], out
@@ -603,34 +629,33 @@ def check_units():
                 settled, refused = text.partition("ESTABLISHED (passed every gate")[2].partition("CLAIMED, BUT STOPPED AT A GATE")[::2]
                 assert f"- [{one['id']}] Lemma one holds (artifact: one.bin)" in settled, text
                 # A stopped claim is not queued: any round may repair it from the list. The person's mark gives it a round of its own.
-                assert "THIS ROUND'S FRAME" not in text and f"- [{two['id']}] Lemma two holds" in refused and "to repair one, claim it again starting the Results line with its id" in text
+                assert "A PLACE TO START" not in text and f"- [{two['id']}] Lemma two holds" in refused and "to repair one, claim it again starting the Results line with its id" in text
                 server.ingest({"project": "c", "type": "research", "id": two["id"], "source": "you", "priority": True})
                 text = server.brief("c", "a")
-                frame = text.partition("THIS ROUND'S FRAME (round 1 of 3 on it; the person marked it)")[2]
+                frame = text.partition("A PLACE TO START (round 1 of 3 on it; the person marked it: start here)")[2]
                 assert f"- [{two['id']}] Lemma two holds" in frame and "It is a claim that a gate stopped." in frame and "Stopped at reproduces (failed) on two.bin:" in frame, text
                 assert "no fault" in frame and "rule it out; do not reword it" in frame
                 assert f"a Results line that starts with [{two['id']}] and ends with [check: <artifact>], or" in frame
                 assert f"- [{loose['id']}] It looks true for n < 100" in text.partition("CLAIMED, NOT YET THROUGH THE GATES")[2]
-                # The person's audit is of this artifact under these gates.
+                # The person's marks are few: first in the queue, a score, a status. Checking a result is the gates' work, not theirs.
                 mark = lambda **k: server.ingest({"project": "c", "type": "research", "id": one["id"], "source": "you", **k})
-                assert mark(audited=True)["audit_fp"] == seal
-                assert next(n for n in server.research("c") if n["id"] == one["id"])["audited"] is True
-                for bad in (dict(audited="yes"), dict(score=6), dict(score=True), dict(score=2.5)):
+                assert "audited" not in next(n for n in server.research("c") if n["id"] == one["id"])
+                for bad in (dict(audited=True), dict(priority="yes"), dict(score=6), dict(score=True), dict(score=2.5)):
                     try:
                         mark(**bad)
                         raise AssertionError(f"mark {bad} was accepted")
                     except ValueError:
                         pass
-                # The person changes the locked question: every verdict and the audit stop counting until the gates run again.
+                # The person changes the locked question: every verdict stops counting until the gates run again.
                 (Path(home) / "c" / "scope.md").write_text("in scope: the parser, over the network only")
                 assert server.public_config("c")["fingerprint"] != seal
                 stale = {n["id"]: n for n in server.research("c")}
-                assert (stale[one["id"]]["state"], stale[one["id"]]["at"], stale[one["id"]]["standing"], stale[one["id"]]["audited"]) == ("waiting", "reproduces", 0, False)
+                assert (stale[one["id"]]["state"], stale[one["id"]]["at"], stale[one["id"]]["standing"]) == ("waiting", "reproduces", 0)
                 assert stale[two["id"]]["state"] == "waiting" and len(server.gates_pending("c")["pending"]) == 2
                 (Path(home) / "c" / "scope.md").write_text("in scope: the parser")
                 back = {n["id"]: n for n in server.research("c")}
-                assert back[one["id"]]["state"] == "established" and back[one["id"]]["audited"] is True and back[two["id"]]["state"] == "failed"
-                # Claimed again by id: every gate runs again on the new artifact, and the audit lapses. Ruled out by id: it leaves the list.
+                assert back[one["id"]]["state"] == "established" and back[two["id"]]["state"] == "failed"
+                # Claimed again by id: every gate runs again on the new artifact. Ruled out by id: it leaves the list.
                 server.ingest({"project": "c", "type": "activity", "agent": "a", "text": "Round 2 started", "data": {"frame": two["id"]}})  # a round is spent when it starts
                 note(f"Handoff: x\nResults:\n- [{two['id']}]: repaired the induction step [check: two-b.bin]\n- [{one['id']}] is not waiting, so this is a new claim [check: one.bin]\n"
                      "- It looks true for n < 100 [check: small.bin]\nNext: y", 2, frame=two["id"], cwd="/somewhere/the/round/worked")
@@ -647,7 +672,9 @@ def check_units():
                 verdict(two["id"], "reproduces", "error", checked="two-b.bin", detail="timeout after 10 min")
                 assert "Stopped at reproduces (could not run) on two-b.bin" in server.brief("c", "a")
                 server.add_frames({"project": "c", "frames": ["a fresh place to look"]})  # an open frame with gates behind it is assumed to pay off
-                assert "Settle it one way or the other:" in server.brief("c", "a").partition("THIS ROUND'S FRAME")[2]
+                assert "It is settled one way or the other by:" in server.brief("c", "a").partition("A PLACE TO START")[2]
+                told = server.sent("c")  # what the page shows as sent: the brief with the handoff block under it, and each gate word for word
+                assert told["round"].startswith(server.brief("c", "a new loop")) and "\nHandoff: <" in told["round"] and [g["name"] for g in told["gates"]] == [g["name"] for g in server.gates_of(server.config("c"))] and all(g["text"] for g in told["gates"]), told
                 # A refuter that cites where a claim was already reported stops it for good: it is not queued for repair.
                 fresh = server.ingest({"project": "c", "type": "research", "status": "supported", "text": "A thing that turns out to be in a 1915 paper", "artifact": "k.bin"})["id"]
                 for gate in ("reproduces", "default config"):
@@ -657,10 +684,10 @@ def check_units():
                 assert (cited["state"], cited["at"], cited["standing"], cited["frame"]) == ("failed", "not known", 2, False), cited
                 assert "ALREADY KNOWN (a gate found each reported elsewhere" in server.brief("c", "a") and fresh not in [n["id"] for n in server.queue(server.research("c"))]
                 assert next(n for n in server.research("c") if n["id"] == two["id"])["frame"] is False  # nothing for a round to repair
-                server.ingest({"project": "c", "type": "research", "id": one["id"], "status": "open", "source": "you"})  # the person reopens what was established and audited
+                server.ingest({"project": "c", "type": "research", "id": one["id"], "status": "open", "source": "you"})  # the person reopens what was established
                 note(f"Handoff: x\nResults:\n- [{one['id']}]: in fact a different thing entirely\nNext: y", 9)
                 redone = next(n for n in server.research("c") if n["id"] == one["id"])
-                assert (redone["text"], redone["state"], redone["at"], redone["audited"], redone["artifact"]) == ("in fact a different thing entirely", "waiting", "reproduces", False, "one.bin"), redone
+                assert (redone["text"], redone["state"], redone["at"], redone["artifact"]) == ("in fact a different thing entirely", "waiting", "reproduces", "one.bin"), redone
                 for bad in ("supported", "reproduced", "gone"):  # the person's mark can reopen, drop or rule out; it cannot make a claim
                     try:
                         server.ingest({"project": "c", "type": "research", "id": one["id"], "status": bad, "source": "you"})
@@ -702,7 +729,7 @@ def check_units():
                 due = server.gates_pending("r")["pending"]
                 assert [x["kind"] for x in due] == ["rate", "rate"] and "Rating: <1 to 5> - " in due[0]["brief"] and "RULES: new results only" in due[0]["brief"] and "Verdict:" not in due[0]["brief"], due
                 # a rater stops nothing: both are established already, with the rating still due and nothing else waiting on it
-                assert all((n["state"], n["rate"], n["rating"]) == ("established", "matters", None) for n in server.research("r"))
+                assert all((n["state"], n["extra"], n["rating"]) == ("established", "matters", None) for n in server.research("r"))
                 fps = {g["name"]: g["fp"] for g in gates}
                 verdict(made["the small one"], "matters", rating=2, detail="Rating: 2 - minor")
                 verdict(made["the big one"], "matters", rating=5, detail="Rating: 5 - changes practice")
@@ -712,7 +739,7 @@ def check_units():
                 listed = [line for line in server.status("r", "http://x").partition("ESTABLISHED")[2].splitlines() if line.startswith("- [")][:2]
                 assert "the big one (rated 5 of 5)" in listed[0] and "the small one (rated 2 of 5)" in listed[1], listed
                 assert "Gates: holds (refuter, on reader) -> known (refuter, on missing) -> matters (rater, on reader)" in server.status("r", "http://x")
-                assert server.gates_pending("r") == {"pending": []} and all(n["rate"] is None for n in server.research("r"))
+                assert server.gates_pending("r") == {"pending": []} and all(n["extra"] is None for n in server.research("r"))
                 # Rewording one gate leaves the others' verdicts standing: only that gate is due again. A rater written first still runs last.
                 cfg = json.loads((Path(home) / "r" / "project.json").read_text())
                 cfg["gates"] = [cfg["gates"][2], cfg["gates"][0], {**cfg["gates"][1], "refute": "Find it elsewhere, and cite it."}]
@@ -741,6 +768,70 @@ def check_units():
                 assert len(lean) <= 12 and sum(len(x) for x in lean) <= 1300, (len(lean), sum(len(x) for x in lean), lean)
             finally:
                 server.PROJECTS, server.LAUNCH_FILE = kept, launch_file
+        # Extra checks: a gate written with "required": false runs only on what the required gates established, and whatever it
+        # says the claim stays established. Its verdict is one more thing known about the claim, shown beside the others.
+        with tempfile.TemporaryDirectory() as home:
+            kept, server.PROJECTS = server.PROJECTS, Path(home)
+            try:
+                (Path(home) / "x").mkdir()
+                cfg = {"goal": "g", "gates": [{"name": "formal proof", "command": "python3 {project}/lean.py", "required": False}, {"name": "runs", "command": "true"},
+                                              {"name": "matters", "rate": "How much?", "required": False}, {"name": "second opinion", "refute": "Try again to break it.", "required": False}]}
+                (Path(home) / "x" / "project.json").write_text(json.dumps(cfg))
+                gates = server.public_config("x")["gates"]  # required first, then the extra checks, then the raters, wherever each was written
+                assert [(g["name"], g.get("required")) for g in gates] == [("runs", None), ("formal proof", False), ("second opinion", False), ("matters", None)], gates
+                text = server.brief("x", "a")
+                assert "A RESULT COUNTS ONLY WHEN IT PASSES THE GATE: runs." in text and "- formal proof: (an extra check: it runs only on what the gates above established, and does not decide whether a result counts) python3 " in text
+                assert "Gates: runs -> formal proof (extra, not required) -> second opinion (extra, not required, refuter) -> matters (rater)" in server.status("x", "http://x")
+                claim = lambda text, artifact: server.ingest({"project": "x", "type": "research", "status": "supported", "text": text, "artifact": artifact, "agent": "a"})["id"]
+                verdict = lambda i, gate, v, artifact: server.ingest({"project": "x", "type": "research", "id": i, "source": "gate", "gate": gate, "verdict": v, "checked": artifact, "detail": f"{gate}: {v}"})
+                one, two, bare = claim("lemma one", "one.lean"), claim("lemma two", "two.lean"), claim("a remark", "")
+                due = lambda: [(x["id"], x["gate"]) for x in server.gates_pending("x", "a")["pending"]]
+                assert due() == [(one, "runs"), (two, "runs")]  # an extra check is not due on a claim that is not established
+                verdict(one, "runs", "passed", "one.lean")
+                verdict(two, "runs", "passed", "two.lean")
+                now = {n["id"]: n for n in server.research("x")}
+                assert (now[one]["state"], now[one]["extra"], now[one]["bucket"]) == ("established", "formal proof", "established") and now[bare]["state"] == "unchecked"
+                assert due() == [(one, "formal proof"), (two, "formal proof")]
+                verdict(one, "formal proof", "passed", "one.lean")
+                verdict(two, "formal proof", "failed", "two.lean")  # the extra check says no: the claim is established all the same
+                now = {n["id"]: n for n in server.research("x")}
+                assert [(now[i]["state"], now[i]["extra"], now[i]["frame"]) for i in (one, two)] == [("established", "second opinion", False)] * 2, now[two]
+                assert sorted(due()) == sorted([(one, "second opinion"), (two, "second opinion")])
+                verdict(one, "second opinion", "passed", "one.lean")
+                verdict(two, "second opinion", "known", "two.lean")  # even "already known" from an extra refuter does not stop it
+                assert sorted(due()) == sorted([(one, "matters"), (two, "matters")]) and all(n["state"] == "established" for n in server.research("x") if n["id"] in (one, two))
+                digest = server.status("x", "http://x")
+                assert "lemma one (extra checks: formal proof passed, second opinion passed)" in digest and "lemma two (extra checks: formal proof said no, second opinion said no)" in digest
+                assert "Counts: 2 established, 1 of them also passed formal proof, 1 of them also passed second opinion, 0 stopped at a gate" in digest and "lemma one (artifact: one.lean) (extra checks: formal proof passed, second opinion passed)" in server.brief("x", "a")
+                # With no required gate nothing can be established, so an extra check on its own never runs.
+                cfg["gates"] = [cfg["gates"][0]]
+                (Path(home) / "x" / "project.json").write_text(json.dumps(cfg))
+                assert all(n["state"] is None for n in server.research("x")) and server.gates_pending("x", "a") == {"pending": []}
+            finally:
+                server.PROJECTS = kept
+        # One spend limit per launch, counted by the server, so it holds for every loop of the launch, including ones added later.
+        with tempfile.TemporaryDirectory() as home:
+            kept, server.PROJECTS, was, laps = server.PROJECTS, Path(home), server.launched, dict(server.LAUNCHES)
+            try:
+                (Path(home) / "s").mkdir()
+                (Path(home) / "s" / "project.json").write_text(json.dumps({"goal": "g", "gates": [{"name": "holds", "refute": "Break it."}]}))
+                server.ingest({"project": "s", "type": "activity", "agent": "old-1", "text": "Round 1 started"})  # before this launch: not counted against it
+                time.sleep(1.1)
+                server.launched = lambda project=None: [{"alive": True, "agent": "w-1", "recipe": "w", "started": "x", "settings": {"spend": 3}}]
+                server.LAUNCHES["s"] = {"since": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"), "spend": 3}
+                assert server.over("s") is None and server.spent("s")["launch"] == 0 and server.spent("s")["limit"] == 3
+                claim = server.ingest({"project": "s", "type": "research", "status": "supported", "text": "a claim", "agent": "w-1"})["id"]
+                server.ingest({"project": "s", "type": "activity", "agent": "w-1", "text": "Round 1 started"})
+                server.ingest({"project": "s", "type": "activity", "agent": "w-2", "text": "Round 1 started"})  # a loop added later counts against the same limit
+                assert server.over("s") is None and server.spent("s")["launch"] == 2
+                server.ingest({"project": "s", "type": "research", "id": claim, "source": "gate", "gate": "holds", "verdict": "passed"})  # a refuter's run is a model round too
+                assert server.spent("s")["launch"] == 3 and "spend limit of 3 model rounds" in server.over("s")
+                server.launched = lambda project=None: []
+                assert server.over("s") is None  # nothing is running: there is no launch to limit
+            finally:
+                server.PROJECTS, server.launched = kept, was
+                server.LAUNCHES.clear()
+                server.LAUNCHES.update(laps)
         # Side by side: two loops never take the same frame, and each runs the gates on its own claims.
         with tempfile.TemporaryDirectory() as home:
             kept, server.PROJECTS, was = server.PROJECTS, Path(home), server.working
@@ -771,7 +862,7 @@ def check_units():
             try:
                 (Path(home) / "f").mkdir()
                 (Path(home) / "f" / "project.json").write_text(json.dumps({"goal": "g"}))
-                made = server.add_frames({"project": "f", "frames": ["src/parse.c: lengths", {"text": "src/net.c: framing", "score": 5, "area": "net", "next": "send a split header"},
+                made = server.add_frames({"project": "f", "frames": ["src/parse.c: lengths", {"text": "src/net.c: framing", "score": 5, "next": "send a split header"},
                                                                      "SRC/parse.c:  lengths.", {"text": "src/util.c: quoting", "score": 1}]})
                 assert len(made["added"]) == 3 and made["skipped"] == 1, made
                 parse, net, util = made["added"]
@@ -783,7 +874,7 @@ def check_units():
                         pass
                 order = lambda: [n["id"] for n in server.queue(server.research("f"))]
                 assert order() == [net, parse, util]  # the highest score, then the oldest
-                assert server.plan("f", "a")[1] == net and "THIS ROUND'S FRAME (round 1 of 5 on it)" in server.brief("f", "a") and "Next test: send a split header" in server.brief("f", "a")
+                assert server.plan("f", "a")[1] == net and "A PLACE TO START (round 1 of 5 on it; no other loop is on it)" in server.brief("f", "a") and "Next test: send a split header" in server.brief("f", "a")
                 def note(body, n, frame=None):
                     if frame:  # the loop says which frame a round was given as the round starts; that is what spends one of its rounds
                         server.ingest({"project": "f", "type": "activity", "agent": "a", "text": f"Round {n} started", "data": {"frame": frame}})
@@ -826,6 +917,47 @@ def check_units():
                 assert given is None and "Nothing is queued, so this round is yours" in text and f"- [{only}] the one place" in text.partition("SET ASIDE (their rounds are spent")[2], text
             finally:
                 server.PROJECTS = kept
+        # A claim's artifact can be read on the page, but only from the project's own working folders, whatever path the claim wrote.
+        with tempfile.TemporaryDirectory() as home:
+            kept, root, server.PROJECTS, server.ROOT = server.PROJECTS, server.ROOT, Path(home) / "projects", Path(home)
+            try:
+                (Path(home) / "projects" / "a").mkdir(parents=True)
+                (Path(home) / "projects" / "a" / "project.json").write_text(json.dumps({"goal": "g", "gates": [{"name": "runs", "command": "true"}]}))
+                work = Path(home) / "agent-work" / "a" / "w-1"
+                work.mkdir(parents=True)
+                (work / "case.json").write_text('{"input": "x"}', encoding="utf-8")
+                (work / "blob.bin").write_bytes(b"\x00\x01\x02" * 10)
+                (Path(home) / "outside.txt").write_text("not this project's")
+                claim = lambda artifact, folder=str(work): server.ingest({"project": "a", "type": "research", "status": "supported", "text": "claim about " + artifact, "artifact": artifact, "folder": folder})["id"]
+                good, blob, away, up, bare = claim("case.json"), claim("blob.bin"), claim(str(Path(home) / "outside.txt")), claim("../../../outside.txt"), server.ingest({"project": "a", "type": "research", "status": "supported", "text": "no artifact"})["id"]
+                assert server.artifact("a", good) == {"name": "case.json", "size": 14, "text": '{"input": "x"}', "cut": False}
+                assert server.artifact("a", blob)["binary"] is True and server.artifact("a", blob)["hex"].startswith("000102")
+                for bad in (away, up, bare, "nope"):
+                    try:
+                        server.artifact("a", bad)
+                        raise AssertionError(f"an artifact outside the project's working folders was served ({bad})")
+                    except ValueError:
+                        pass
+                # A report of an established result is assembled from the record: the claim, the input, the command, what each gate said.
+                # It is refused for anything not established, and it does not carry this machine's paths.
+                try:
+                    server.report("a", good)
+                    raise AssertionError("a report was written for a claim that is not established")
+                except ValueError as error:
+                    assert "established" in str(error)
+                # A claim's history says what happened without repeating each gate's whole output; the output stays on the gate's own verdict.
+                server.ingest({"project": "a", "type": "research", "id": good, "source": "gate", "gate": "runs", "verdict": "passed", "checked": "case.json", "detail": "many lines\nof output"})
+                seen = next(n for n in server.research("a") if n["id"] == good)
+                assert seen["gates"]["runs"]["detail"] == "many lines\nof output" and all("detail" not in h and "body" not in h for h in seen["history"]) and seen["history"][-1]["verdict"] == "passed"
+                server.ingest({"project": "a", "type": "research", "id": good, "source": "gate", "gate": "runs", "verdict": "passed", "checked": "case.json",
+                               "detail": f"read {work}/case.json\nit fails as claimed"})
+                text = server.report("a", good)
+                for expected in ("# claim about case.json", "it passed runs.", "The input is the file `case.json` (14 bytes).", '{"input": "x"}', "Run:", "true case.json",
+                                 "read <hades>/agent-work/a/w-1/case.json", "- **runs** (a command): passed.", "weaker evidence than a command"):
+                    assert expected in text, (expected, text)
+                assert str(Path(home)) not in text
+            finally:
+                server.PROJECTS, server.ROOT = kept, root
         # Write-ups: an assistant's explanations for the person, as Markdown files in the project's folder. Read-only here.
         with tempfile.TemporaryDirectory() as home:
             kept, server.PROJECTS = server.PROJECTS, Path(home)
@@ -850,7 +982,27 @@ def check_units():
                 assert "How the parser works" not in server.brief("u", "a")  # a round never reads them: they are not the record
             finally:
                 server.PROJECTS = kept
-        # A launch's spend limit is split between its loops, and each loop stops once its share of model rounds is used.
+        # When the record is long, the brief and the digest cut each list short and say how much they left out.
+        with tempfile.TemporaryDirectory() as home:
+            kept, server.PROJECTS = server.PROJECTS, Path(home)
+            try:
+                (Path(home) / "big").mkdir()
+                (Path(home) / "big" / "project.json").write_text(json.dumps({"goal": "g", "gates": [{"name": "runs", "command": "true"}]}))
+                for i in range(30):
+                    one = server.ingest({"project": "big", "type": "research", "status": "supported", "text": f"result {i}", "artifact": f"r{i}.txt"})["id"]
+                    server.ingest({"project": "big", "type": "research", "id": one, "source": "gate", "gate": "runs", "verdict": "passed" if i < 24 else "failed", "checked": f"r{i}.txt",
+                                   "detail": "\n".join(f"line {k}" for k in range(1, 10))})
+                for i in range(26):
+                    server.ingest({"project": "big", "type": "research", "status": "contradicted", "text": f"dead end {i}"})
+                text, digest = server.brief("big", "a"), server.status("big", "http://x")
+                assert "ESTABLISHED (passed the gate" in text and "  and 4 more" in text.partition("ESTABLISHED")[2].partition("CLAIMED, BUT STOPPED")[0]
+                assert "  and 6 more" in text.partition("RULED OUT")[2] and "  and 4 more" in digest.partition("ESTABLISHED")[2].partition("STOPPED AT A GATE")[0]
+                stopped = text.partition("CLAIMED, BUT STOPPED AT A GATE")[2].partition("RULED OUT")[0]
+                assert "line 9" in stopped and "line 7" in stopped and "line 6" not in stopped  # six are stopped, so each shows the gate's last three lines, not eight
+                assert len(text) < 9000, len(text)
+            finally:
+                server.PROJECTS = kept
+        # Loop settings are cleaned the same way wherever they come from; settings that no longer exist are dropped.
         assert server.clean_loop({"spend": 12, "workers": 2}) == {"workers": 2, "spend": 12} and server.clean_loop({"tools": "wide", "reply_wait": 5}) == {}
         asks = server.handoff_items("Handoff: x\nResults: none\n**Decision needed:** Extend past 100?\nDecisions:\n- Use the slow kernel?\nAssumed: stayed under 100\nAssumptions:\n- none\nNext: y")
         assert asks["decision"] == ["Extend past 100?", "Use the slow kernel?", "stayed under 100"] and not asks["results"], asks

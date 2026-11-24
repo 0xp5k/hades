@@ -11,6 +11,7 @@ Use these, and only these, when you report.
 - **Frame**: a place to look, not yet settled. Leads from a round become frames; you can queue them.
 - **Claim**: what a round says it found. **Ruled out**: a frame that was examined and had nothing.
 - **Gate**: a test a claim must pass. **Established**: the claim passed every gate. **Waiting**: a gate is due. **Stopped**: a gate said no, or could not run. **Unchecked**: the next gate is a command and the claim named nothing to run it on.
+- **Extra check**: a gate that is not required. It runs only on what is established and never stops a claim.
 - **Score**: 1 to 5, how many rounds a frame is worth; 3 if nobody said. **Set aside**: its rounds are spent and it is still open.
 - **Assumption**: something a round decided in the person's place.
 
@@ -25,6 +26,7 @@ Report in the record's own terms.
 - A result is **established** only when its `state` is `established`. Say which gates it passed, and which kind each was: a refuter that could not kill a claim is weaker than a command that passed.
 - Anything else is still a claim. Say which gate it is waiting at or stopped at (`at`) and what the gate said.
 - Nothing else in Hades checks a result. Do not call a claim true because a round said so.
+- To hand an established result to someone outside the project, `GET /api/report?project=ID&id=K` returns it written up in Markdown from the record: use that as the base of an issue or a message instead of composing one from memory.
 
 ## Explain, when the person asks
 
@@ -43,7 +45,7 @@ The loop never waits for any of this. Everything is JSON POSTed to the server.
 
 | To | Send |
 |---|---|
-| Queue places to look | `/api/frames` `{"project", "frames": ["text", {"text", "score", "area", "next"}]}` |
+| Queue places to look | `/api/frames` `{"project", "frames": ["text", {"text", "score", "next"}]}` |
 | Put a frame first, with its rounds to spend again | `/api/events` `{"project", "type": "research", "id", "priority": true, "source": "you"}` |
 | Say how many rounds a frame is worth | the same, with `"score": 4` |
 | Drop a frame or claim, rule it out, or reopen it | the same, with `"status": "superseded"`, `"contradicted"` or `"open"` |
@@ -51,7 +53,6 @@ The loop never waits for any of this. Everything is JSON POSTed to the server.
 | Tell every round something | `/api/project` `{"project", "direction": "..."}` (`""` removes it) |
 | Change the goal, target or rules | `/api/project` `{"project", "goal": "..."}` |
 | Hold the loop before its next round, or release it | `/api/project` `{"project", "paused": true}` |
-| Record that the person checked a claim themselves | `/api/events` `{..., "id", "audited": true, "source": "you"}`, only when they say they did |
 
 Use the person's own words for a direction or an answer, and tell them what is now set. Keep a direction to what the rounds should work on, not how: the brief is short on purpose.
 
@@ -73,6 +74,7 @@ For stronger checking, write the gates for the person. There is no API for this:
 
 - A **command** gate is run with the claim's artifact as its last argument, in the folder the claim's round worked in; exit code 0 passes.
 - A **refuter** (`refute`) is a fresh round that sees only the claim. A **rater** (`rate`) gives an established claim a number from 1 to 5 and never stops one. Either can name a `recipe` from `launchers.json` to run on another agent.
+- An **extra check** is a command or refuter written with `"required": false`: another verifier beyond what every claim must pass. It runs only on established claims, and the claim stays established whatever it says. When the person wants a stronger test that only some results will meet, add it this way instead of making it a gate. Report what each extra check said about an established result.
 - Each refuter or rater costs a whole model round per claim. Make a check a command whenever a program can decide it, and among gates of the same cost put the one that rejects most first.
 - `lock` names files in the project folder that define the question. Change one and every verdict stops counting; reword a gate and its own verdicts do.
 - Test a gate on something that should pass and something that should not, and show the person what you wrote. Never loosen or remove a gate unless they ask.
@@ -80,6 +82,8 @@ For stronger checking, write the gates for the person. There is no API for this:
 ## Run
 
 `POST /api/launch {"project": "<id>"}` starts the loop with the saved settings and `POST /api/stop {"project": "<id>"}` stops it. Starting a loop spends the person's model usage, so say what you are about to start and wait for a yes.
+
+While loops are running, `POST /api/launch {"project": "<id>", "add": true}` starts one more beside them without stopping any (up to four on a project); add `"recipe"` to start a different agent on the same record. `POST /api/stop {"project": "<id>", "agent": "<name>"}` stops one. An added loop is offered the next free frame as a place to start and counts against the same spend limit.
 
 To change how it runs, read `GET /api/project?project=<id>`, change the keys asked for, and send the whole `loop` object back with `POST /api/project {"project", "loop": {...}}`. The keys: `recipe`, `model`, `rounds` (0 = until stopped), `timeout_min` (0 = no limit), `workers` (1 to 4 loops side by side, each on its own frame), `spend` (the most model rounds one launch may use, research and checking together; 0 = no limit) and `keep_background`. Hades has no clock: to start a run at a set time, schedule the launch call yourself.
 
